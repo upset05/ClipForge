@@ -1,4 +1,4 @@
-
+import numpy as np
 import json
 from pathlib import Path
 from datetime import datetime
@@ -123,9 +123,9 @@ def main():
 
         for heading, body in scenes:
             image = make_scene(heading, body, index)
-            clips.append(
-                ImageClip(image).with_duration(DURATION)
-            )
+           clips.append(
+    ImageClip(np.array(image)).with_duration(DURATION)
+)
 
         video = concatenate_videoclips(clips, method="compose")
 
