@@ -4,6 +4,7 @@ import hashlib
 import subprocess
 import wave
 import math
+import random
 from pathlib import Path
 from io import BytesIO
 
@@ -18,20 +19,27 @@ from moviepy import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
 PLAN = ROOT / "reports" / "content_plan.json"
 OUTPUT = ROOT / "output"
 ASSETS = ROOT / "assets" / "images"
 AUDIO = ROOT / "assets" / "audio"
+VOICE_DIR = ROOT / "assets" / "voices"
+
+VOICE_MODEL = VOICE_DIR / "en_US-lessac-medium.onnx"
 
 WIDTH = 1080
 HEIGHT = 1920
-SCENE_DURATION = 4
 FPS = 24
 MAX_STORIES = 5
 SAMPLE_RATE = 44100
 
+MUSIC_VOLUME = 0.12
+VOICE_VOLUME = 1.0
+SCENE_PAUSE = 0.35
+
 HEADERS = {
-    "User-Agent": "ClipForge/1.0 (gaming news video renderer)"
+    "User-Agent": "ClipForge/2.0 (gaming news renderer)"
 }
 
 
@@ -69,65 +77,108 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
-def download_image(url, article_id):
-    if not url:
-        return None
+def get_image_urls(idea):
+    """Read multiple image URLs when the content planner provides them."""
+    urls = []
 
+    supplied = idea.get("image_urls", [])
+
+    if isinstance(supplied, list):
+        urls.extend(supplied)
+
+    primary = idea.get("image_url")
+
+    if primary:
+        urls.append(primary)
+
+    unique = []
+
+    for url in urls:
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            if url not in unique:
+                unique.append(url)
+
+    return unique
+
+
+def download_images(urls, article_id):
     ASSETS.mkdir(parents=True, exist_ok=True)
-    filename = ASSETS / f"{article_id}.jpg"
 
-    if filename.exists():
-        return filename
+    downloaded = []
 
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=20
-        )
-        response.raise_for_status()
+    for index, url in enumerate(urls[:8]):
+        filename = ASSETS / f"{article_id}_{index}.jpg"
 
-        if len(response.content) > 15 * 1024 * 1024:
-            print("Image skipped: file too large.")
-            return None
+        if filename.exists():
+            downloaded.append(filename)
+            continue
 
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-        image.thumbnail((1600, 1600))
-        image.save(filename, "JPEG", quality=90)
-
-        print(f"Downloaded image: {filename}")
-        return filename
-
-    except Exception as error:
-        print(f"Image download failed: {error}")
-        return None
-
-
-def load_background(image_path):
-    if image_path and Path(image_path).exists():
         try:
-            image = Image.open(image_path).convert("RGB")
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                timeout=20
+            )
+            response.raise_for_status()
 
-            image_ratio = image.width / image.height
-            target_ratio = WIDTH / HEIGHT
+            if len(response.content) > 15 * 1024 * 1024:
+                continue
 
-            if image_ratio > target_ratio:
-                new_width = int(image.height * target_ratio)
-                left = (image.width - new_width) // 2
-                image = image.crop(
-                    (left, 0, left + new_width, image.height)
-                )
-            else:
-                new_height = int(image.width / target_ratio)
-                top = (image.height - new_height) // 2
-                image = image.crop(
-                    (0, top, image.width, top + new_height)
-                )
+            image = Image.open(
+                BytesIO(response.content)
+            ).convert("RGB")
 
-            return image.resize((WIDTH, HEIGHT))
+            if image.width < 300 or image.height < 200:
+                continue
+
+            image.thumbnail((1800, 1800))
+            image.save(filename, "JPEG", quality=90)
+
+            downloaded.append(filename)
+
+            print(f"Image downloaded: {filename.name}")
 
         except Exception as error:
-            print(f"Background image error: {error}")
+            print(f"Image download failed: {error}")
+
+    return downloaded
+
+
+def load_background(image_path, scene_number):
+    if image_path and Path(image_path).exists():
+        image = Image.open(image_path).convert("RGB")
+
+        # Use different framing when the article only has one image.
+        image_ratio = image.width / image.height
+        target_ratio = WIDTH / HEIGHT
+
+        if image_ratio > target_ratio:
+            crop_width = int(image.height * target_ratio)
+            available = image.width - crop_width
+
+            offset = int(
+                available * ((scene_number * 0.23) % 1)
+            )
+
+            image = image.crop(
+                (offset, 0, offset + crop_width, image.height)
+            )
+        else:
+            crop_height = int(image.width / target_ratio)
+            available = image.height - crop_height
+
+            offset = int(
+                available * ((scene_number * 0.23) % 1)
+            )
+
+            image = image.crop(
+                (0, offset, image.width, offset + crop_height)
+            )
+
+        image = image.resize((WIDTH, HEIGHT))
+        image = ImageEnhance.Brightness(image).enhance(0.82)
+
+        return image
 
     return Image.new("RGB", (WIDTH, HEIGHT), "#101522")
 
@@ -135,14 +186,18 @@ def load_background(image_path):
 def add_bottom_gradient(image):
     image = image.convert("RGBA")
 
-    gradient = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    pixels = gradient.load()
+    gradient = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0)
+    )
 
-    start_y = int(HEIGHT * 0.55)
+    pixels = gradient.load()
+    start_y = int(HEIGHT * 0.57)
 
     for y in range(start_y, HEIGHT):
         progress = (y - start_y) / (HEIGHT - start_y)
-        alpha = int(175 * (progress ** 1.5))
+        alpha = int(205 * (progress ** 1.4))
 
         for x in range(WIDTH):
             pixels[x, y] = (0, 0, 0, alpha)
@@ -150,15 +205,15 @@ def add_bottom_gradient(image):
     return Image.alpha_composite(image, gradient)
 
 
-def make_scene(heading, body, image_path=None):
-    image = load_background(image_path)
+def make_scene(heading, caption, image_path, scene_number):
+    image = load_background(image_path, scene_number)
     image = add_bottom_gradient(image)
 
     draw = ImageDraw.Draw(image)
 
     brand_font = load_font(29)
-    title_font = load_font(67)
-    body_font = load_font(39)
+    title_font = load_font(65)
+    caption_font = load_font(39)
 
     draw.text(
         (65, 75),
@@ -200,69 +255,119 @@ def make_scene(heading, body, image_path=None):
             stroke_width=3,
             stroke_fill=(0, 0, 0, 180)
         )
-        y += 85
+        y += 82
 
-    y += 20
+    # Captions are placed below the heading.
+    y += 25
 
-    body_lines = wrap_text(
+    caption_lines = wrap_text(
         draw,
-        body,
-        body_font,
+        caption,
+        caption_font,
         WIDTH - 140
     )
 
-    for line in body_lines[:4]:
-        if y > HEIGHT - 160:
+    for line in caption_lines[:5]:
+        if y > HEIGHT - 130:
             break
 
         draw.text(
             (65, y),
             line,
-            font=body_font,
+            font=caption_font,
             fill="#e8edf5",
             stroke_width=2,
-            stroke_fill=(0, 0, 0, 180)
+            stroke_fill=(0, 0, 0, 190)
         )
-        y += 54
+
+        y += 55
 
     return image.convert("RGB")
 
 
+def generate_narration(text, filename):
+    """Generate neural narration using Piper."""
+    clean_text = " ".join(str(text).split())
+
+    if not clean_text:
+        return False
+
+    if not VOICE_MODEL.exists():
+        raise FileNotFoundError(
+            f"Piper voice model missing: {VOICE_MODEL}"
+        )
+
+    try:
+        subprocess.run(
+            [
+                "piper",
+                "--model", str(VOICE_MODEL),
+                "--output_file", str(filename),
+                "--length_scale", "1.05"
+            ],
+            input=clean_text,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=90
+        )
+
+        return Path(filename).exists()
+
+    except Exception as error:
+        print(f"Piper narration failed: {error}")
+        raise
+
+
+def audio_duration(filename):
+    with wave.open(str(filename), "rb") as audio:
+        return audio.getnframes() / audio.getframerate()
+
+
 def generate_music(filename, duration):
-    """Generate an original electronic background track."""
+    """Generate the original calming electronic background track."""
     AUDIO.mkdir(parents=True, exist_ok=True)
 
-    sample_count = int(SAMPLE_RATE * duration)
+    sample_count = max(1, int(SAMPLE_RATE * duration))
+    times = np.arange(sample_count) / SAMPLE_RATE
+
     audio = np.zeros(sample_count, dtype=np.float64)
 
     frequencies = [110, 164.81, 220, 329.63]
 
     for index, frequency in enumerate(frequencies):
         amplitude = 0.12 if index < 2 else 0.055
-        phase = index * 0.7
 
         audio += amplitude * np.sin(
-            2 * math.pi * frequency *
-            np.arange(sample_count) / SAMPLE_RATE + phase
+            2 * math.pi * frequency * times + index * 0.7
         )
 
-    # Gentle pulsing electronic rhythm.
-    times = np.arange(sample_count) / SAMPLE_RATE
-    pulse = 0.78 + 0.22 * np.sin(2 * math.pi * 1.5 * times)
+    pulse = 0.78 + 0.22 * np.sin(
+        2 * math.pi * 1.5 * times
+    )
+
     audio *= pulse
 
-    # Smooth fade in and fade out.
-    fade_length = min(int(SAMPLE_RATE * 1.2), sample_count // 2)
+    fade_length = min(
+        int(SAMPLE_RATE * 1.5),
+        sample_count // 2
+    )
+
     envelope = np.ones(sample_count)
 
-    envelope[:fade_length] = np.linspace(0, 1, fade_length)
-    envelope[-fade_length:] = np.linspace(1, 0, fade_length)
+    if fade_length > 0:
+        envelope[:fade_length] = np.linspace(
+            0, 1, fade_length
+        )
+
+        envelope[-fade_length:] = np.linspace(
+            1, 0, fade_length
+        )
 
     audio *= envelope
     audio = np.clip(audio, -0.85, 0.85)
 
     stereo = np.column_stack((audio, audio))
-
     pcm = (stereo * 32767).astype(np.int16)
 
     with wave.open(str(filename), "wb") as output:
@@ -272,114 +377,159 @@ def generate_music(filename, duration):
         output.writeframes(pcm.tobytes())
 
 
-def generate_narration(text, filename):
-    """Generate offline speech using eSpeak NG."""
-    clean_text = " ".join(str(text).split())[:260]
+def build_scenes(idea):
+    title = str(idea.get("title", "Gaming News"))
+    hook = str(idea.get("hook", title))
+    summary = str(idea.get("summary", "")).strip()
+    category = str(idea.get("category", "Gaming"))
 
-    if not clean_text:
-        return False
+    if not summary:
+        summary = title
 
-    try:
-        subprocess.run(
-            [
-                "espeak-ng",
-                "-v", "en-us",
-                "-s", "165",
-                "-a", "170",
-                "-w", str(filename),
-                clean_text
-            ],
-            check=True,
-            capture_output=True,
-            timeout=30
-        )
-
-        return Path(filename).exists()
-
-    except Exception as error:
-        print(f"Narration generation failed: {error}")
-        return False
+    # Keep the narration meaningful rather than repeating the same
+    # sentence in several scenes.
+    return [
+        {
+            "heading": "THE LATEST",
+            "narration": hook
+        },
+        {
+            "heading": category.upper(),
+            "narration": title
+        },
+        {
+            "heading": "HERE'S WHAT HAPPENED",
+            "narration": summary
+        },
+        {
+            "heading": "THE BIG QUESTION",
+            "narration": (
+                "What do you think about this development? "
+                "Follow ClipForge for more gaming news."
+            )
+        }
+    ]
 
 
 def create_video(idea, index):
     title = str(idea.get("title", "Gaming News"))
-    hook = str(idea.get("hook", title))
-    summary = str(idea.get("summary", ""))
-    category = str(idea.get("category", "Gaming"))
 
     article_id = idea.get("id") or hashlib.sha256(
         idea.get("link", title).encode("utf-8")
     ).hexdigest()[:16]
 
-    image_path = download_image(
-        idea.get("image_url", ""),
-        article_id
-    )
+    print(f"\nPreparing story {index}: {title}")
 
-    scenes = [
-        ("LATEST GAMING NEWS", hook, hook),
-        (category.upper(), title, title),
-        (
-            "WHAT YOU NEED TO KNOW",
-            summary or "Read the original report for more details.",
-            summary or title
-        ),
-        (
-            "WHAT DO YOU THINK?",
-            "Follow ClipForge for more gaming updates.",
-            "Follow ClipForge for more gaming updates."
-        )
-    ]
+    image_urls = get_image_urls(idea)
+    images = download_images(image_urls, article_id)
 
-    clips = []
-    audio_clips = []
-    video = None
-    final_audio = None
+    print(f"Usable images: {len(images)}")
+
+    scenes = build_scenes(idea)
 
     AUDIO.mkdir(parents=True, exist_ok=True)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+
+    voice_files = []
+    voice_clips = []
+    video_clips = []
+
+    music_clip = None
+    final_audio = None
+    video = None
 
     try:
+        # Generate all narration before deciding scene durations.
+        for scene_number, scene in enumerate(scenes):
+            voice_path = AUDIO / (
+                f"voice_{article_id}_{scene_number}.wav"
+            )
+
+            generate_narration(
+                scene["narration"],
+                voice_path
+            )
+
+            duration = audio_duration(voice_path)
+
+            scene["voice_path"] = voice_path
+            scene["duration"] = duration + SCENE_PAUSE
+
+            voice_files.append(voice_path)
+
+            print(
+                f"Scene {scene_number + 1}: "
+                f"{duration:.1f}s narration"
+            )
+
+        total_duration = sum(
+            scene["duration"] for scene in scenes
+        )
+
+        print(f"Video duration: {total_duration:.1f} seconds")
+
+        # Create music to match the complete video.
         music_path = AUDIO / f"music_{article_id}.wav"
-        generate_music(music_path, SCENE_DURATION * len(scenes))
+        generate_music(music_path, total_duration)
 
         music_clip = AudioFileClip(str(music_path))
-        audio_clips.append(music_clip.with_volume_scaled(0.16))
 
-        for scene_number, (heading, body, narration) in enumerate(scenes):
+        music_clip = music_clip.with_volume_scaled(
+            MUSIC_VOLUME
+        )
+
+        voice_timeline = []
+        current_time = 0
+
+        for scene_number, scene in enumerate(scenes):
+            # Rotate through available images. If only one exists,
+            # use different crops for each scene.
+            image_path = (
+                images[scene_number % len(images)]
+                if images else None
+            )
+
             frame_image = make_scene(
-                heading,
-                body,
-                image_path
+                scene["heading"],
+                scene["narration"],
+                image_path,
+                scene_number
             )
 
             frame = np.array(frame_image)
 
-            clip = ImageClip(frame).with_duration(SCENE_DURATION)
-            clips.append(clip)
+            clip = ImageClip(frame).with_duration(
+                scene["duration"]
+            )
 
-            narration_path = AUDIO / f"voice_{article_id}_{scene_number}.wav"
+            video_clips.append(clip)
 
-            if generate_narration(narration, narration_path):
-                voice = AudioFileClip(str(narration_path))
-                audio_clips.append(
-                    voice
-                    .with_start(scene_number * SCENE_DURATION)
-                    .with_volume_scaled(1.0)
-                )
-                print(f"Voice generated for scene {scene_number + 1}")
+            voice = AudioFileClip(
+                str(scene["voice_path"])
+            )
 
-        video = concatenate_videoclips(clips, method="compose")
+            voice = voice.with_start(current_time)
+            voice = voice.with_volume_scaled(VOICE_VOLUME)
 
-        final_audio = CompositeAudioClip(audio_clips).with_duration(
-            video.duration
+            voice_clips.append(voice)
+            voice_timeline.append(voice)
+
+            current_time += scene["duration"]
+
+        video = concatenate_videoclips(
+            video_clips,
+            method="compose"
         )
+
+        final_audio = CompositeAudioClip(
+            [music_clip] + voice_timeline
+        ).with_duration(video.duration)
 
         video = video.with_audio(final_audio)
 
-        OUTPUT.mkdir(parents=True, exist_ok=True)
         filename = OUTPUT / f"story_{index}.mp4"
 
-        print(f"Rendering story {index}: {title}")
+        print(f"Rendering: {filename.name}")
 
         video.write_videofile(
             str(filename),
@@ -387,10 +537,14 @@ def create_video(idea, index):
             codec="libx264",
             audio_codec="aac",
             audio_bitrate="192k",
+            preset="medium",
             logger="bar"
         )
 
-        print(f"SUCCESS: Created {filename}")
+        print(
+            f"SUCCESS: {filename.name} "
+            f"({video.duration:.1f} seconds)"
+        )
 
     finally:
         if video:
@@ -399,18 +553,23 @@ def create_video(idea, index):
         if final_audio:
             final_audio.close()
 
-        for clip in clips:
+        for clip in video_clips:
             clip.close()
 
-        for clip in audio_clips:
+        for clip in voice_clips:
             clip.close()
+
+        if music_clip:
+            music_clip.close()
 
 
 def main():
-    print("ClipForge visual and audio renderer starting...")
+    print("ClipForge 2.0 renderer starting...")
 
     if not PLAN.exists():
-        raise FileNotFoundError(f"Content plan not found: {PLAN}")
+        raise FileNotFoundError(
+            f"Content plan not found: {PLAN}"
+        )
 
     with open(PLAN, "r", encoding="utf-8") as file:
         plan = json.load(file)
@@ -421,18 +580,13 @@ def main():
         print("No content ideas available.")
         return
 
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-
     rendered = 0
 
-    for index, idea in enumerate(ideas[:MAX_STORIES], 1):
-        try:
-            create_video(idea, index)
-            rendered += 1
-
-        except Exception as error:
-            print(f"FAILED to render story {index}: {error}")
-            raise
+    for index, idea in enumerate(
+        ideas[:MAX_STORIES], 1
+    ):
+        create_video(idea, index)
+        rendered += 1
 
     print("--------------------------------")
     print("ClipForge rendering complete.")
