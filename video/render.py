@@ -1,6 +1,5 @@
 
 import json
-import re
 import hashlib
 from pathlib import Path
 from io import BytesIO
@@ -65,7 +64,6 @@ def download_image(url, article_id):
         return None
 
     ASSETS.mkdir(parents=True, exist_ok=True)
-
     filename = ASSETS / f"{article_id}.jpg"
 
     if filename.exists():
@@ -85,11 +83,9 @@ def download_image(url, article_id):
 
         image = Image.open(BytesIO(response.content)).convert("RGB")
         image.thumbnail((1600, 1600))
-
-        image.save(filename, "JPEG", quality=88)
+        image.save(filename, "JPEG", quality=90)
 
         print(f"Downloaded image: {filename}")
-
         return filename
 
     except Exception as error:
@@ -119,8 +115,6 @@ def load_background(image_path):
                 )
 
             image = image.resize((WIDTH, HEIGHT))
-            image = ImageEnhance.Brightness(image).enhance(0.48)
-
             return image
 
         except Exception as error:
@@ -129,82 +123,104 @@ def load_background(image_path):
     return Image.new("RGB", (WIDTH, HEIGHT), "#101522")
 
 
-def make_scene(heading, body, story_number, scene_number, image_path=None):
-    image = load_background(image_path)
+def add_bottom_gradient(image):
+    image = image.convert("RGBA")
 
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (8, 13, 25, 105))
-    image = Image.alpha_composite(image.convert("RGBA"), overlay)
+    gradient = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    pixels = gradient.load()
+
+    start_y = int(HEIGHT * 0.55)
+
+    for y in range(start_y, HEIGHT):
+        progress = (y - start_y) / (HEIGHT - start_y)
+        alpha = int(175 * (progress ** 1.5))
+
+        for x in range(WIDTH):
+            pixels[x, y] = (0, 0, 0, alpha)
+
+    return Image.alpha_composite(image, gradient)
+
+
+def make_scene(heading, body, scene_number, image_path=None):
+    image = load_background(image_path)
+    image = add_bottom_gradient(image)
 
     draw = ImageDraw.Draw(image)
 
-    title_font = load_font(66)
-    body_font = load_font(43)
-    small_font = load_font(28)
+    brand_font = load_font(29)
+    title_font = load_font(67)
+    body_font = load_font(39)
 
-    draw.rounded_rectangle(
-        (65, 75, WIDTH - 65, 180),
-        radius=28,
-        fill=(36, 52, 79, 235)
+    # Small branding, without a solid background panel.
+    draw.text(
+        (65, 75),
+        "CLIPFORGE",
+        font=brand_font,
+        fill=(255, 255, 255, 235),
+        stroke_width=2,
+        stroke_fill=(0, 0, 0, 150)
     )
 
     draw.text(
-        (95, 105),
-        "CLIPFORGE / GAMING",
-        font=small_font,
-        fill="white"
+        (65, 120),
+        "GAMING NEWS",
+        font=load_font(21),
+        fill="#65d6ff",
+        stroke_width=1,
+        stroke_fill=(0, 0, 0, 130)
     )
 
+    # Small cyan accent line.
     draw.rounded_rectangle(
-        (55, 250, WIDTH - 55, HEIGHT - 260),
-        radius=35,
-        fill=(10, 16, 29, 175)
+        (65, HEIGHT - 650, 125, HEIGHT - 640),
+        radius=5,
+        fill="#65d6ff"
     )
 
+    # Headline.
     heading_lines = wrap_text(
         draw,
         heading,
         title_font,
-        WIDTH - 170
+        WIDTH - 130
     )
 
-    y = 330
+    y = HEIGHT - 600
 
     for line in heading_lines[:3]:
         draw.text(
-            (80, y),
+            (65, y),
             line,
             font=title_font,
-            fill="#65d6ff"
+            fill="white",
+            stroke_width=3,
+            stroke_fill=(0, 0, 0, 180)
         )
         y += 85
 
-    y += 55
+    y += 20
 
+    # Supporting text.
     body_lines = wrap_text(
         draw,
         body,
         body_font,
-        WIDTH - 170
+        WIDTH - 140
     )
 
-    for line in body_lines[:12]:
-        if y > HEIGHT - 390:
+    for line in body_lines[:4]:
+        if y > HEIGHT - 160:
             break
 
         draw.text(
-            (80, y),
+            (65, y),
             line,
             font=body_font,
-            fill="white"
+            fill="#e8edf5",
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 180)
         )
-        y += 70
-
-    draw.text(
-        (80, HEIGHT - 180),
-        f"STORY {story_number}  |  SCENE {scene_number}",
-        font=small_font,
-        fill="#d4deef"
-    )
+        y += 54
 
     return image.convert("RGB")
 
@@ -225,10 +241,10 @@ def create_video(idea, index):
     )
 
     scenes = [
-        ("TODAY IN GAMING", hook),
+        ("LATEST GAMING NEWS", hook),
         (category.upper(), title),
-        ("THE DETAILS", summary or "More information is available from the original source."),
-        ("YOUR TAKE?", "What do you think about this? Follow for more gaming updates.")
+        ("WHAT YOU NEED TO KNOW", summary or "Read the original report for more details."),
+        ("WHAT DO YOU THINK?", "Follow ClipForge for more gaming updates.")
     ]
 
     clips = []
@@ -239,20 +255,25 @@ def create_video(idea, index):
             frame_image = make_scene(
                 heading,
                 body,
-                index,
                 scene_number,
                 image_path
             )
 
             frame = np.array(frame_image)
 
-            clip = ImageClip(frame).with_duration(SCENE_DURATION)
+            # Gentle zoom across each scene.
+            clip = (
+                ImageClip(frame)
+                .with_duration(SCENE_DURATION)
+                .resized(lambda t: 1.0 + 0.025 * (t / SCENE_DURATION))
+                .with_position("center")
+            )
+
             clips.append(clip)
 
         video = concatenate_videoclips(clips, method="compose")
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
-
         filename = OUTPUT / f"story_{index}.mp4"
 
         print(f"Rendering story {index}: {title}")
