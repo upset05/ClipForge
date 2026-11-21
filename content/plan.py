@@ -14,9 +14,15 @@ TARGET_MIN_SECONDS = 30
 TARGET_MAX_SECONDS = 45
 WORDS_PER_MINUTE = 145
 
+# Approximate narration budget for a 30–45 second video.
+MIN_TARGET_WORDS = 73
+MAX_TARGET_WORDS = 108
+
 
 def clean(text):
     text = html.unescape(str(text or ""))
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -60,26 +66,19 @@ def classify(text):
     return "Gaming"
 
 
-def make_hook(title, category):
-    if category == "GTA":
-        return "GTA fans, here's the latest development you need to know."
+def make_hook(category):
+    hooks = {
+        "GTA": "GTA fans, here's what the latest report says.",
+        "Rockstar": "There's a new Rockstar development to look at.",
+        "Updates": "Here's the latest update from the gaming world.",
+        "PlayStation": "PlayStation players, here's the latest report.",
+        "Xbox": "Xbox players, here's what has been reported.",
+        "Nintendo": "Nintendo fans, here's the latest development.",
+        "PC Gaming": "PC gamers, here's a story worth checking out.",
+        "Gaming": "Here's the latest gaming story."
+    }
 
-    if category == "Rockstar":
-        return "Rockstar has a new development worth looking at."
-
-    if category == "Updates":
-        return "There's a gaming update you should know about."
-
-    if category == "PlayStation":
-        return "PlayStation players, here's what's happening."
-
-    if category == "Xbox":
-        return "Xbox players, here's the latest."
-
-    if category == "Nintendo":
-        return "Nintendo fans, here's the latest development."
-
-    return "Here's a gaming story worth your attention."
+    return hooks.get(category, hooks["Gaming"])
 
 
 def split_sentences(text):
@@ -97,6 +96,54 @@ def split_sentences(text):
     ]
 
 
+def extract_article_text(article):
+    """
+    Prefer the fuller RSS content when it exists.
+    Avoid adding the same summary twice.
+    """
+    parts = []
+
+    summary = clean(article.get("summary", ""))
+
+    if summary:
+        parts.append(summary)
+
+    content = article.get("content", [])
+
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                value = clean(item.get("value", ""))
+            else:
+                value = clean(item)
+
+            if value:
+                parts.append(value)
+
+    elif isinstance(content, str):
+        value = clean(content)
+
+        if value:
+            parts.append(value)
+
+    description = clean(article.get("description", ""))
+
+    if description:
+        parts.append(description)
+
+    unique_parts = []
+    seen = set()
+
+    for part in parts:
+        normalized = part.lower()
+
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_parts.append(part)
+
+    return " ".join(unique_parts)
+
+
 def estimate_duration(text):
     words = len(clean(text).split())
 
@@ -106,63 +153,122 @@ def estimate_duration(text):
     return round((words / WORDS_PER_MINUTE) * 60)
 
 
-def make_script(title, summary, category, publisher):
-    hook = make_hook(title, category)
-    sentences = split_sentences(summary)
+def select_story_sentences(source_text, title, word_budget):
+    """
+    Select source sentences without inventing or padding facts.
+    Avoid repeating the headline if it already appears in the body.
+    """
+    sentences = split_sentences(source_text)
+    selected = []
+    used_words = 0
 
-    if sentences:
-        report_text = " ".join(sentences[:6])
-    else:
-        report_text = (
-            "The available report does not contain enough detail "
-            "to explain the development confidently."
-        )
+    normalized_title = clean(title).lower().rstrip(".!?")
 
-    context = f"This story was reported by {publisher}." if publisher else (
-        "This story comes from the linked gaming news report."
+    for sentence in sentences:
+        normalized = sentence.lower().rstrip(".!?")
+
+        if normalized == normalized_title:
+            continue
+
+        sentence_words = len(sentence.split())
+
+        if sentence_words < 4:
+            continue
+
+        if used_words + sentence_words > word_budget:
+            remaining = word_budget - used_words
+
+            # Do not cut a sentence in half just to hit a word target.
+            if remaining < 12:
+                break
+
+            continue
+
+        selected.append(sentence)
+        used_words += sentence_words
+
+        if used_words >= word_budget:
+            break
+
+    return selected
+
+
+def make_script(title, source_text, category, publisher):
+    hook = make_hook(category)
+
+    # Reserve space for the hook, source line and short closing.
+    hook_words = len(hook.split())
+    ending = "Follow ClipForge for more gaming news."
+    ending_words = len(ending.split())
+
+    source_line = (
+        f"This report comes from {publisher}."
+        if publisher
+        else "This is based on the linked news report."
     )
 
-    takeaway = (
-        "We will need further confirmed details before drawing "
-        "any bigger conclusions."
+    source_words = len(source_line.split())
+
+    story_budget = (
+        MAX_TARGET_WORDS
+        - hook_words
+        - ending_words
+        - source_words
     )
 
-    ending = (
-        "What do you think about this development? "
-        "Follow ClipForge for more gaming news."
+    story_sentences = select_story_sentences(
+        source_text,
+        title,
+        story_budget
     )
 
     segments = [
-        {"label": "HOOK", "text": hook},
-        {"label": "STORY", "text": report_text},
-        {"label": "SOURCE", "text": context},
-        {"label": "TAKEAWAY", "text": takeaway},
-        {"label": "ENDING", "text": ending}
+        {"label": "HOOK", "text": hook}
     ]
+
+    if story_sentences:
+        segments.append({
+            "label": "THE STORY",
+            "text": " ".join(story_sentences)
+        })
+
+    if publisher:
+        segments.append({
+            "label": "SOURCE",
+            "text": source_line
+        })
+
+    segments.append({
+        "label": "ENDING",
+        "text": ending
+    })
 
     narration = " ".join(
         segment["text"] for segment in segments
     )
 
+    word_count = len(narration.split())
     duration = estimate_duration(narration)
+
+    if duration < TARGET_MIN_SECONDS:
+        duration_status = "too_short"
+    elif duration > TARGET_MAX_SECONDS:
+        duration_status = "too_long"
+    else:
+        duration_status = "within_target"
 
     return {
         "hook": hook,
         "segments": segments,
         "full_text": narration,
-        "word_count": len(narration.split()),
+        "word_count": word_count,
         "estimated_duration_seconds": duration,
         "target_duration_seconds": [
             TARGET_MIN_SECONDS,
             TARGET_MAX_SECONDS
         ],
-        "duration_status": (
-            "within_target"
-            if TARGET_MIN_SECONDS <= duration <= TARGET_MAX_SECONDS
-            else "too_short"
-            if duration < TARGET_MIN_SECONDS
-            else "too_long"
-        )
+        "duration_status": duration_status,
+        "source_sentence_count": len(story_sentences)
     }
 
 
@@ -174,8 +280,18 @@ def latest_discovery_report():
     )
 
     for file in files:
-        if file.name != "content_plan.json":
-            return file
+        if file.name == "content_plan.json":
+            continue
+
+        try:
+            with open(file, encoding="utf-8") as source:
+                data = json.load(source)
+
+            if isinstance(data.get("articles"), list):
+                return file
+
+        except (OSError, json.JSONDecodeError):
+            continue
 
     return None
 
@@ -190,12 +306,14 @@ def main():
         config = {}
 
     limits = config.get("limits", {})
-    max_ideas = limits.get("max_ideas", DEFAULT_MAX_IDEAS)
+    max_ideas = int(
+        limits.get("max_ideas", DEFAULT_MAX_IDEAS)
+    )
 
     discovery_file = latest_discovery_report()
 
     if not discovery_file:
-        print("No discovery report found.")
+        print("No valid discovery report found.")
         return
 
     with open(discovery_file, encoding="utf-8") as file:
@@ -216,13 +334,18 @@ def main():
         seen_links.add(link)
 
         publisher = clean(article.get("source", ""))
-        summary = clean(article.get("summary", ""))
-        category = classify(f"{title} {summary}")
+        source_text = extract_article_text(article)
+
+        category = classify(
+            f"{title} {source_text}"
+        )
 
         media_assets = article.get("media_assets", [])
 
-        # Keep rights information intact. Discovery alone cannot
-        # establish that an image or video is permitted for reuse.
+        if not isinstance(media_assets, list):
+            media_assets = []
+
+        # RSS media remains unapproved until separately checked.
         for asset in media_assets:
             asset["approved_for_reuse"] = False
 
@@ -243,7 +366,7 @@ def main():
 
         script = make_script(
             title,
-            summary,
+            source_text,
             category,
             publisher
         )
@@ -252,13 +375,14 @@ def main():
             "id": article.get("id", ""),
             "title": title,
             "link": link,
-            "summary": summary,
+            "summary": clean(article.get("summary", "")),
+            "source_text": source_text,
             "score": article.get("score", 0),
             "category": category,
             "source": publisher,
             "source_url": link,
             "feed_url": article.get("feed_url", ""),
-            "author": article.get("author", ""),
+            "author": clean(article.get("author", "")),
             "published": article.get("published", ""),
             "hook": script["hook"],
             "script": script["full_text"],
@@ -271,6 +395,7 @@ def main():
                 script["target_duration_seconds"]
             ),
             "duration_status": script["duration_status"],
+            "source_sentence_count": script["source_sentence_count"],
             "image_url": images[0] if images else "",
             "image_urls": images,
             "video_urls": videos,
@@ -280,7 +405,7 @@ def main():
                 "publisher": publisher,
                 "article_title": title,
                 "article_url": link,
-                "author": article.get("author", "")
+                "author": clean(article.get("author", ""))
             }
         }
 
@@ -329,7 +454,10 @@ def main():
             file.write(
                 f"**Duration status:** {idea['duration_status']}\n\n"
             )
-            file.write("**Script:**\n\n")
+            file.write(
+                f"**Word count:** {idea['word_count']}\n\n"
+            )
+            file.write("**Narration:**\n\n")
 
             for segment in idea["script_segments"]:
                 file.write(
@@ -342,7 +470,8 @@ def main():
             if idea["media_assets"]:
                 for asset in idea["media_assets"]:
                     file.write(
-                        f"- {asset['kind']}: {asset['url']}\n"
+                        f"- {asset.get('kind', 'unknown')}: "
+                        f"{asset.get('url', '')}\n"
                     )
                     file.write(
                         f"  - Creator: "
@@ -374,11 +503,17 @@ def main():
         for idea in selected
     )
 
+    too_short = sum(
+        idea["duration_status"] == "too_short"
+        for idea in selected
+    )
+
     print("--------------------------------")
     print(f"Generated ideas: {len(selected)}")
     print(f"Ideas with images: {with_images}")
     print(f"Ideas with video candidates: {with_videos}")
-    print(f"Scripts within target duration: {within_target}")
+    print(f"Scripts within target: {within_target}")
+    print(f"Scripts too short: {too_short}")
     print(f"Plan: {plan_path}")
     print("Content planning complete.")
     print("--------------------------------")
