@@ -1,11 +1,12 @@
 
-import json
-import re
 import hashlib
 import html
+import json
+import re
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 
@@ -13,97 +14,226 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "discovery" / "sources.json"
 OUTPUT = ROOT / "reports"
 
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
 
-def clean(text):
-    text = html.unescape(str(text or ""))
-    return re.sub(r"\s+", " ", text).strip()
+HEADERS = {
+    "User-Agent": "ClipForge/1.0 (gaming news discovery)"
+}
 
 
-def extract_image(entry):
-    """
-    Extract the best available image URL from an RSS entry.
-    """
+def clean(value):
+    value = html.unescape(str(value or ""))
+    return re.sub(r"\s+", " ", value).strip()
 
-    # 1. Media RSS images
-    media_content = entry.get("media_content", [])
 
-    for media in media_content:
-        image_url = media.get("url", "")
-        media_type = media.get("type", "")
+def valid_media_url(url, base_url=""):
+    url = html.unescape(str(url or "")).strip()
 
-        if image_url and (
-            media_type.startswith("image/")
-            or re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", image_url, re.I)
-        ):
-            return {
-                "url": image_url,
-                "caption": clean(media.get("title", "")),
-                "source": "media_content"
-            }
+    if not url:
+        return ""
 
-    # 2. Media thumbnails
-    thumbnails = entry.get("media_thumbnail", [])
+    url = urljoin(base_url, url)
+    parsed = urlparse(url)
 
-    if thumbnails:
-        image_url = thumbnails[0].get("url", "")
+    if parsed.scheme not in ("http", "https"):
+        return ""
 
-        if image_url:
-            return {
-                "url": image_url,
-                "caption": "",
-                "source": "media_thumbnail"
-            }
+    return url
 
-    # 3. Enclosures
-    for enclosure in entry.get("enclosures", []):
-        image_url = enclosure.get("href") or enclosure.get("url", "")
-        media_type = enclosure.get("type", "")
 
-        if image_url and media_type.startswith("image/"):
-            return {
-                "url": image_url,
-                "caption": "",
-                "source": "enclosure"
-            }
+def media_kind(url, media_type=""):
+    media_type = str(media_type or "").lower()
+    path = urlparse(url).path.lower()
 
-    # 4. Images embedded in the article summary
-    summary = entry.get("summary", "")
+    if media_type.startswith("video/") or path.endswith(VIDEO_EXTENSIONS):
+        return "video"
 
-    image_matches = re.findall(
-        r'<img[^>]+src=["\']([^"\']+)["\']',
-        summary,
-        re.IGNORECASE
-    )
+    if media_type.startswith("image/") or path.endswith(IMAGE_EXTENSIONS):
+        return "image"
 
-    if image_matches:
-        return {
-            "url": html.unescape(image_matches[0]),
-            "caption": "",
-            "source": "summary"
-        }
+    return ""
 
-    # 5. Images embedded in content blocks
-    for content in entry.get("content", []):
-        value = content.get("value", "")
 
-        image_matches = re.findall(
-            r'<img[^>]+src=["\']([^"\']+)["\']',
-            value,
-            re.IGNORECASE
+class MediaHTMLParser(HTMLParser):
+    def __init__(self, base_url):
+        super().__init__()
+        self.base_url = base_url
+        self.assets = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+
+        if tag == "img":
+            url = attrs.get("src") or attrs.get("data-src") or attrs.get("data-original")
+            self.add(url, "image", attrs.get("alt", ""), "embedded_html")
+
+        elif tag == "video":
+            self.add(
+                attrs.get("src"),
+                "video",
+                attrs.get("title", ""),
+                "embedded_html"
+            )
+            self.add(
+                attrs.get("poster"),
+                "image",
+                attrs.get("title", ""),
+                "video_poster"
+            )
+
+        elif tag == "source":
+            url = attrs.get("src")
+            kind = media_kind(url or "", attrs.get("type", ""))
+
+            if kind:
+                self.add(url, kind, "", "embedded_html")
+
+        elif tag == "a":
+            url = attrs.get("href", "")
+            kind = media_kind(url)
+
+            if kind == "video":
+                self.add(url, "video", "", "linked_video")
+
+    def add(self, url, kind, caption, discovered_from):
+        url = valid_media_url(url, self.base_url)
+
+        if not url:
+            return
+
+        self.assets.append({
+            "url": url,
+            "kind": kind,
+            "caption": clean(caption),
+            "discovered_from": discovered_from
+        })
+
+
+def creator_from_entry(entry):
+    author = clean(entry.get("author", ""))
+
+    if author:
+        return author
+
+    authors = entry.get("authors", [])
+
+    if authors:
+        return clean(authors[0].get("name", ""))
+
+    return ""
+
+
+def extract_media(entry, article_url, publisher):
+    assets = []
+    seen = set()
+
+    def add_asset(url, kind="", caption="", creator="", discovered_from="rss"):
+        url = valid_media_url(url, article_url)
+
+        if not url:
+            return
+
+        kind = kind or media_kind(url)
+
+        if kind not in ("image", "video"):
+            return
+
+        if url in seen:
+            return
+
+        seen.add(url)
+
+        assets.append({
+            "url": url,
+            "kind": kind,
+            "caption": clean(caption),
+            "creator": clean(creator),
+            "publisher": publisher,
+            "source_url": article_url,
+            "discovered_from": discovered_from,
+            "license": "",
+            "rights_status": "unverified",
+            "approved_for_reuse": False
+        })
+
+    entry_creator = creator_from_entry(entry)
+
+    # Media RSS content
+    for media in entry.get("media_content", []):
+        add_asset(
+            media.get("url", ""),
+            media_kind(
+                media.get("url", ""),
+                media.get("type", "")
+            ),
+            media.get("title", ""),
+            media.get("credit", "") or entry_creator,
+            "media_content"
         )
 
-        if image_matches:
-            return {
-                "url": html.unescape(image_matches[0]),
-                "caption": "",
-                "source": "content"
-            }
+    # Media RSS thumbnails
+    for media in entry.get("media_thumbnail", []):
+        add_asset(
+            media.get("url", ""),
+            "image",
+            media.get("title", ""),
+            entry_creator,
+            "media_thumbnail"
+        )
 
-    return {
-        "url": "",
-        "caption": "",
-        "source": "unavailable"
-    }
+    # Enclosures
+    for enclosure in entry.get("enclosures", []):
+        url = enclosure.get("href") or enclosure.get("url", "")
+        kind = media_kind(url, enclosure.get("type", ""))
+
+        if kind:
+            add_asset(
+                url,
+                kind,
+                enclosure.get("title", ""),
+                entry_creator,
+                "enclosure"
+            )
+
+    # Other RSS links
+    for link in entry.get("links", []):
+        url = link.get("href", "")
+        kind = media_kind(url, link.get("type", ""))
+
+        if kind:
+            add_asset(
+                url,
+                kind,
+                link.get("title", ""),
+                entry_creator,
+                "rss_link"
+            )
+
+    # Images and videos embedded in summaries or content
+    html_blocks = [entry.get("summary", "")]
+
+    for content in entry.get("content", []):
+        html_blocks.append(content.get("value", ""))
+
+    for block in html_blocks:
+        parser = MediaHTMLParser(article_url)
+
+        try:
+            parser.feed(str(block or ""))
+        except Exception:
+            continue
+
+        for asset in parser.assets:
+            add_asset(
+                asset["url"],
+                asset["kind"],
+                asset["caption"],
+                entry_creator,
+                asset["discovered_from"]
+            )
+
+    return assets
 
 
 def score_article(article, keywords, priority):
@@ -125,6 +255,15 @@ def score_article(article, keywords, priority):
     return score
 
 
+def publisher_name(feed, feed_url):
+    name = clean(feed.feed.get("title", ""))
+
+    if name:
+        return name
+
+    return urlparse(feed_url).netloc.replace("www.", "")
+
+
 def main():
     with open(CONFIG, encoding="utf-8") as file:
         config = json.load(file)
@@ -134,43 +273,61 @@ def main():
     articles = []
     seen = set()
 
+    max_articles = config.get("limits", {}).get("max_articles", 50)
+    max_images = config.get("limits", {}).get("max_images_per_article", 8)
+    max_videos = config.get("limits", {}).get("max_videos_per_article", 5)
+
     print("ClipForge discovery starting...")
 
-    for url in config["feeds"]:
+    for feed_url in config.get("feeds", []):
         try:
-            print(f"Checking feed: {url}")
+            print(f"Checking feed: {feed_url}")
 
-            feed = feedparser.parse(url)
+            feed = feedparser.parse(feed_url)
 
             if getattr(feed, "bozo", False):
-                print(f"Feed warning: {url}")
+                print(f"Feed warning: {feed_url}")
+
+            publisher = publisher_name(feed, feed_url)
 
             for entry in feed.entries:
                 title = clean(entry.get("title"))
-                link = entry.get("link", "")
+                link = valid_media_url(entry.get("link", ""))
 
                 if not title or not link:
                     continue
 
-                key = hashlib.sha256(
+                article_id = hashlib.sha256(
                     link.encode("utf-8")
                 ).hexdigest()
 
-                if key in seen:
+                if article_id in seen:
                     continue
-
-                seen.add(key)
 
                 score = score_article(
                     entry,
-                    config["keywords"],
-                    config["priority_keywords"]
+                    config.get("keywords", []),
+                    config.get("priority_keywords", [])
                 )
 
                 if score <= 0:
                     continue
 
-                image = extract_image(entry)
+                seen.add(article_id)
+
+                media = extract_media(entry, link, publisher)
+
+                images = [
+                    item for item in media
+                    if item["kind"] == "image"
+                ][:max_images]
+
+                videos = [
+                    item for item in media
+                    if item["kind"] == "video"
+                ][:max_videos]
+
+                selected_media = images + videos
 
                 published = (
                     entry.get("published")
@@ -179,79 +336,103 @@ def main():
                 )
 
                 article = {
-                    "id": key[:16],
+                    "id": article_id[:16],
                     "title": title,
                     "link": link,
-                    "summary": clean(entry.get("summary")),
-                    "image_url": image["url"],
-                    "image_caption": image["caption"],
-                    "image_source": image["source"],
+                    "summary": clean(entry.get("summary", "")),
                     "score": score,
-                    "source": url,
-                    "published": published
+                    "source": publisher,
+                    "feed_url": feed_url,
+                    "published": published,
+                    "author": creator_from_entry(entry),
+                    "media_assets": selected_media,
+                    "image_urls": [item["url"] for item in images],
+                    "video_urls": [item["url"] for item in videos],
+                    "image_url": images[0]["url"] if images else "",
+                    "image_caption": images[0]["caption"] if images else "",
+                    "image_source": publisher if images else "unavailable",
+                    "media_rights_review_required": bool(selected_media)
                 }
 
                 articles.append(article)
 
         except Exception as error:
-            print(f"Feed failed: {url} | {error}")
+            print(f"Feed failed: {feed_url} | {error}")
 
     articles.sort(
-        key=lambda item: item["score"],
+        key=lambda item: (
+            item["score"],
+            item["published"]
+        ),
         reverse=True
     )
 
     now = datetime.now(timezone.utc)
     date = now.strftime("%Y-%m-%d")
 
+    selected = articles[:max_articles]
+
     report = {
         "generated_at": now.isoformat(),
         "total_candidates": len(articles),
         "articles_with_images": sum(
-            1 for article in articles
-            if article["image_url"]
+            1 for article in selected if article["image_urls"]
         ),
-        "articles": articles[:50]
+        "articles_with_videos": sum(
+            1 for article in selected if article["video_urls"]
+        ),
+        "total_media_candidates": sum(
+            len(article["media_assets"]) for article in selected
+        ),
+        "articles": selected
     }
 
     json_path = OUTPUT / f"{date}.json"
     md_path = OUTPUT / f"{date}.md"
 
     with open(json_path, "w", encoding="utf-8") as file:
-        json.dump(
-            report,
-            file,
-            indent=2,
-            ensure_ascii=False
-        )
+        json.dump(report, file, indent=2, ensure_ascii=False)
 
     with open(md_path, "w", encoding="utf-8") as file:
         file.write(f"# ClipForge Discovery — {date}\n\n")
-        file.write(f"Found {len(articles)} relevant articles.\n\n")
-        file.write(
-            f"Articles with images: "
-            f"{report['articles_with_images']}\n\n"
-        )
+        file.write(f"Relevant articles: {len(selected)}\n\n")
+        file.write(f"Articles with images: {report['articles_with_images']}\n\n")
+        file.write(f"Articles with videos: {report['articles_with_videos']}\n\n")
+        file.write(f"Media candidates: {report['total_media_candidates']}\n\n")
 
-        for article in articles[:30]:
+        for article in selected:
             file.write(f"## {article['title']}\n\n")
-            file.write(f"Score: {article['score']}\n\n")
-            file.write(f"{article['summary'][:600]}\n\n")
+            file.write(f"**Score:** {article['score']}\n\n")
+            file.write(f"**Publisher:** {article['source']}\n\n")
+            file.write(f"{article['summary'][:700]}\n\n")
+            file.write(f"**Article:** {article['link']}\n\n")
 
-            if article["image_url"]:
+            for asset in article["media_assets"]:
                 file.write(
-                    f"Image: {article['image_url']}\n\n"
+                    f"- {asset['kind'].title()}: {asset['url']}\n"
                 )
-            else:
-                file.write("Image: Not available in feed\n\n")
+                file.write(
+                    f"  - Creator: {asset['creator'] or 'Not identified'}\n"
+                )
+                file.write(
+                    f"  - Rights: {asset['rights_status']}\n"
+                )
+                file.write(
+                    f"  - Reuse approved: No\n"
+                )
 
-            file.write(f"Source: {article['link']}\n\n")
-            file.write("---\n\n")
+            if not article["media_assets"]:
+                file.write("No media candidates found in the feed.\n")
+
+            file.write("\n---\n\n")
 
     print("--------------------------------")
-    print(f"Candidates: {len(articles)}")
+    print(f"Candidates discovered: {len(articles)}")
+    print(f"Articles selected: {len(selected)}")
     print(f"Articles with images: {report['articles_with_images']}")
-    print(f"Report: {md_path}")
+    print(f"Articles with videos: {report['articles_with_videos']}")
+    print(f"Media candidates: {report['total_media_candidates']}")
+    print(f"Report: {json_path}")
     print("Discovery complete.")
     print("--------------------------------")
 
