@@ -1,0 +1,26 @@
+{
+  "feeds": [
+    "https://www.rockstargames.com/newswire/rss",
+    "https://feeds.feedburner.com/ign/all",
+    "https://www.pcgamer.com/rss/",
+    "https://www.gamesradar.com/rss/"
+  ],
+  "keywords": [
+    "gta 6",
+    "gta vi",
+    "grand theft auto",
+    "rockstar games",
+    "vice city",
+    "gaming",
+    "gameplay",
+    "game update",
+    "gaming news"
+  ],
+  "priority_keywords": [
+    "gta 6",
+    "gta vi",
+    "grand theft auto",
+    "rockstar games",
+    "vice city"
+  ]
+}
