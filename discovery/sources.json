@@ -1,3 +1,4 @@
+
 {
   "feeds": [
     "https://www.rockstargames.com/newswire/rss",
@@ -5,22 +6,80 @@
     "https://www.pcgamer.com/rss/",
     "https://www.gamesradar.com/rss/"
   ],
+  "official_sources": [
+    {
+      "name": "Rockstar Games",
+      "url": "https://www.rockstargames.com/newswire",
+      "type": "official_news"
+    },
+    {
+      "name": "PlayStation Blog",
+      "url": "https://blog.playstation.com/",
+      "type": "official_news"
+    },
+    {
+      "name": "Xbox Wire",
+      "url": "https://news.xbox.com/",
+      "type": "official_news"
+    },
+    {
+      "name": "Nintendo News",
+      "url": "https://www.nintendo.com/us/whatsnew/",
+      "type": "official_news"
+    },
+    {
+      "name": "Steam News",
+      "url": "https://store.steampowered.com/news/",
+      "type": "official_news"
+    }
+  ],
+  "media_policy": {
+    "allow_reuse_without_permission": false,
+    "require_license_or_permission": true,
+    "require_creator_attribution": true,
+    "skip_unknown_rights": true,
+    "accepted_licenses": [
+      "CC0",
+      "CC BY",
+      "CC BY-SA",
+      "public_domain",
+      "explicit_permission"
+    ]
+  },
   "keywords": [
     "gta 6",
     "gta vi",
     "grand theft auto",
     "rockstar games",
     "vice city",
+    "playstation",
+    "xbox",
+    "nintendo",
+    "pc gaming",
     "gaming",
     "gameplay",
     "game update",
-    "gaming news"
+    "game release",
+    "game trailer",
+    "gaming news",
+    "game announcement",
+    "gameplay reveal"
   ],
   "priority_keywords": [
     "gta 6",
     "gta vi",
     "grand theft auto",
     "rockstar games",
-    "vice city"
-  ]
+    "vice city",
+    "official announcement",
+    "release date",
+    "gameplay reveal"
+  ],
+  "limits": {
+    "max_articles": 50,
+    "max_images_per_article": 8,
+    "max_videos_per_article": 5,
+    "max_ideas": 10,
+    "max_videos_per_run": 5
+  }
 }
