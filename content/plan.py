@@ -1,3 +1,4 @@
+
 import json
 import re
 from pathlib import Path
@@ -6,31 +7,47 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "reports"
 
+MAX_IDEAS = 10
+
+
+def clean(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
 def classify(text):
     t = text.lower()
 
-    if any(x in t for x in ["gta 6", "gta vi", "grand theft auto", "vice city"]):
+    if any(x in t for x in [
+        "gta 6", "gta vi", "grand theft auto", "vice city"
+    ]):
         return "GTA"
 
-    if any(x in t for x in ["rockstar"]):
+    if "rockstar" in t:
         return "Rockstar"
 
-    if any(x in t for x in ["update", "patch", "release", "launch"]):
+    if any(x in t for x in [
+        "update", "patch", "release", "launch"
+    ]):
         return "Updates"
 
     return "Gaming"
 
+
 def make_hook(title, category):
     if category == "GTA":
         return f"What this could mean for GTA fans: {title}"
+
     if category == "Rockstar":
         return f"Rockstar just gave us something to talk about: {title}"
+
     if category == "Updates":
         return f"Here's what changed: {title}"
+
     return f"This gaming story deserves attention: {title}"
 
+
 def make_script(title, summary, category):
-    summary = re.sub(r"\s+", " ", summary).strip()
+    summary = clean(summary)
 
     if len(summary) > 450:
         summary = summary[:447] + "..."
@@ -41,6 +58,7 @@ def make_script(title, summary, category):
         f"DETAILS: {summary or 'Further research is required.'}\n\n"
         "ENDING: What do you think about this? Let us know."
     )
+
 
 def main():
     files = sorted(
@@ -58,57 +76,98 @@ def main():
         print("No discovery report found.")
         return
 
-    with open(files[0], encoding="utf-8") as f:
-        report = json.load(f)
+    with open(files[0], encoding="utf-8") as file:
+        report = json.load(file)
 
     candidates = report.get("articles", [])
+
     selected = []
-    used_categories = set()
+    seen_links = set()
 
     for article in candidates:
-        category = classify(article["title"])
+        title = clean(article.get("title"))
+        link = article.get("link", "")
 
-        if category not in used_categories:
-            selected.append({
-                "title": article["title"],
-                "link": article["link"],
-                "summary": article.get("summary", ""),
-                "score": article.get("score", 0),
-                "category": category,
-                "hook": make_hook(article["title"], category),
-                "script": make_script(
-                    article["title"],
-                    article.get("summary", ""),
-                    category
-                )
-            })
-            used_categories.add(category)
+        if not title or not link:
+            continue
 
-        if len(selected) >= 10:
+        if link in seen_links:
+            continue
+
+        seen_links.add(link)
+
+        category = classify(title)
+        summary = clean(article.get("summary", ""))
+
+        idea = {
+            "title": title,
+            "link": link,
+            "summary": summary,
+            "score": article.get("score", 0),
+            "category": category,
+
+            "image_url": article.get("image_url", ""),
+            "image_caption": article.get("image_caption", ""),
+            "image_source": article.get("image_source", "unavailable"),
+
+            "published": article.get("published", ""),
+            "source": article.get("source", ""),
+
+            "hook": make_hook(title, category),
+            "script": make_script(title, summary, category)
+        }
+
+        selected.append(idea)
+
+        if len(selected) >= MAX_IDEAS:
             break
 
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    date = now.strftime("%Y-%m-%d")
 
     plan = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now.isoformat(),
+        "source_report": files[0].name,
+        "total_ideas": len(selected),
         "ideas": selected
     }
 
-    with open(REPORTS / "content_plan.json", "w", encoding="utf-8") as f:
-        json.dump(plan, f, indent=2, ensure_ascii=False)
+    plan_path = REPORTS / "content_plan.json"
 
-    with open(REPORTS / f"ideas-{date}.md", "w", encoding="utf-8") as f:
-        f.write(f"# ClipForge Content Plan — {date}\n\n")
+    with open(plan_path, "w", encoding="utf-8") as file:
+        json.dump(
+            plan,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    markdown_path = REPORTS / f"ideas-{date}.md"
+
+    with open(markdown_path, "w", encoding="utf-8") as file:
+        file.write(f"# ClipForge Content Plan — {date}\n\n")
+        file.write(f"Generated ideas: {len(selected)}\n\n")
 
         for i, idea in enumerate(selected, 1):
-            f.write(f"## Idea {i}: {idea['category']}\n\n")
-            f.write(f"**Title:** {idea['title']}\n\n")
-            f.write(f"**Hook:** {idea['hook']}\n\n")
-            f.write(f"**Source:** {idea['link']}\n\n")
-            f.write(f"**Script draft:**\n\n{idea['script']}\n\n")
-            f.write("---\n\n")
+            file.write(f"## Idea {i}: {idea['category']}\n\n")
+            file.write(f"**Title:** {idea['title']}\n\n")
+            file.write(f"**Hook:** {idea['hook']}\n\n")
+            file.write(f"**Image:** {idea['image_url'] or 'Not available'}\n\n")
+            file.write(f"**Source:** {idea['link']}\n\n")
+            file.write(f"**Script draft:**\n\n{idea['script']}\n\n")
+            file.write("---\n\n")
 
-    print(f"Generated {len(selected)} content ideas.")
+    with_images = sum(
+        1 for idea in selected if idea["image_url"]
+    )
+
+    print("--------------------------------")
+    print(f"Generated ideas: {len(selected)}")
+    print(f"Ideas with images: {with_images}")
+    print(f"Plan: {plan_path}")
+    print("Content planning complete.")
+    print("--------------------------------")
+
 
 if __name__ == "__main__":
     main()
