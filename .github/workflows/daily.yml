@@ -25,7 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install feedparser pillow moviepy
+          pip install feedparser pillow moviepy requests
 
       - name: Run discovery engine
         run: python discovery/feeds.py
