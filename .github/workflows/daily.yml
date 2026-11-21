@@ -1,0 +1,31 @@
+name: ClipForge Cloud Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify worker
+        run: |
+          python -c "import datetime; print('ClipForge worker is alive:', datetime.datetime.now(datetime.timezone.utc))"
+
+      - name: Report
+        run: |
+          echo "ClipForge cloud worker completed successfully."
