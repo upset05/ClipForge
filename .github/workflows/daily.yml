@@ -11,7 +11,7 @@ permissions:
 jobs:
   worker:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -22,10 +22,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify worker
-        run: |
-          python -c "import datetime; print('ClipForge worker is alive:', datetime.datetime.now(datetime.timezone.utc))"
+      - name: Install discovery dependency
+        run: pip install feedparser
 
-      - name: Report
-        run: |
-          echo "ClipForge cloud worker completed successfully."
+      - name: Run discovery engine
+        run: python discovery/feeds.py
+
+      - name: Upload discovery reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipforge-discovery-report
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
