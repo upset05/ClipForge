@@ -28,7 +28,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install audio tools
         run: |
@@ -56,8 +55,10 @@ jobs:
 
       - name: Verify rendered videos
         run: |
+          set -e
           echo "Checking generated videos..."
           find output -maxdepth 1 -type f -name "*.mp4" -print
+
           COUNT=$(find output -maxdepth 1 -type f -name "*.mp4" | wc -l)
           echo "Videos generated: $COUNT"
 
