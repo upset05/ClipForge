@@ -1,24 +1,34 @@
 
 import json
 import hashlib
+import subprocess
+import wave
+import math
 from pathlib import Path
 from io import BytesIO
 
 import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
-from moviepy import ImageClip, concatenate_videoclips
+from moviepy import (
+    ImageClip,
+    AudioFileClip,
+    CompositeAudioClip,
+    concatenate_videoclips
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAN = ROOT / "reports" / "content_plan.json"
 OUTPUT = ROOT / "output"
 ASSETS = ROOT / "assets" / "images"
+AUDIO = ROOT / "assets" / "audio"
 
 WIDTH = 1080
 HEIGHT = 1920
 SCENE_DURATION = 4
 FPS = 24
 MAX_STORIES = 5
+SAMPLE_RATE = 44100
 
 HEADERS = {
     "User-Agent": "ClipForge/1.0 (gaming news video renderer)"
@@ -114,8 +124,7 @@ def load_background(image_path):
                     (0, top, image.width, top + new_height)
                 )
 
-            image = image.resize((WIDTH, HEIGHT))
-            return image
+            return image.resize((WIDTH, HEIGHT))
 
         except Exception as error:
             print(f"Background image error: {error}")
@@ -141,7 +150,7 @@ def add_bottom_gradient(image):
     return Image.alpha_composite(image, gradient)
 
 
-def make_scene(heading, body, scene_number, image_path=None):
+def make_scene(heading, body, image_path=None):
     image = load_background(image_path)
     image = add_bottom_gradient(image)
 
@@ -151,12 +160,11 @@ def make_scene(heading, body, scene_number, image_path=None):
     title_font = load_font(67)
     body_font = load_font(39)
 
-    # Small branding, without a solid background panel.
     draw.text(
         (65, 75),
         "CLIPFORGE",
         font=brand_font,
-        fill=(255, 255, 255, 235),
+        fill="white",
         stroke_width=2,
         stroke_fill=(0, 0, 0, 150)
     )
@@ -165,19 +173,15 @@ def make_scene(heading, body, scene_number, image_path=None):
         (65, 120),
         "GAMING NEWS",
         font=load_font(21),
-        fill="#65d6ff",
-        stroke_width=1,
-        stroke_fill=(0, 0, 0, 130)
+        fill="#65d6ff"
     )
 
-    # Small cyan accent line.
     draw.rounded_rectangle(
         (65, HEIGHT - 650, 125, HEIGHT - 640),
         radius=5,
         fill="#65d6ff"
     )
 
-    # Headline.
     heading_lines = wrap_text(
         draw,
         heading,
@@ -200,7 +204,6 @@ def make_scene(heading, body, scene_number, image_path=None):
 
     y += 20
 
-    # Supporting text.
     body_lines = wrap_text(
         draw,
         body,
@@ -225,6 +228,79 @@ def make_scene(heading, body, scene_number, image_path=None):
     return image.convert("RGB")
 
 
+def generate_music(filename, duration):
+    """Generate an original electronic background track."""
+    AUDIO.mkdir(parents=True, exist_ok=True)
+
+    sample_count = int(SAMPLE_RATE * duration)
+    audio = np.zeros(sample_count, dtype=np.float64)
+
+    frequencies = [110, 164.81, 220, 329.63]
+
+    for index, frequency in enumerate(frequencies):
+        amplitude = 0.12 if index < 2 else 0.055
+        phase = index * 0.7
+
+        audio += amplitude * np.sin(
+            2 * math.pi * frequency *
+            np.arange(sample_count) / SAMPLE_RATE + phase
+        )
+
+    # Gentle pulsing electronic rhythm.
+    times = np.arange(sample_count) / SAMPLE_RATE
+    pulse = 0.78 + 0.22 * np.sin(2 * math.pi * 1.5 * times)
+    audio *= pulse
+
+    # Smooth fade in and fade out.
+    fade_length = min(int(SAMPLE_RATE * 1.2), sample_count // 2)
+    envelope = np.ones(sample_count)
+
+    envelope[:fade_length] = np.linspace(0, 1, fade_length)
+    envelope[-fade_length:] = np.linspace(1, 0, fade_length)
+
+    audio *= envelope
+    audio = np.clip(audio, -0.85, 0.85)
+
+    stereo = np.column_stack((audio, audio))
+
+    pcm = (stereo * 32767).astype(np.int16)
+
+    with wave.open(str(filename), "wb") as output:
+        output.setnchannels(2)
+        output.setsampwidth(2)
+        output.setframerate(SAMPLE_RATE)
+        output.writeframes(pcm.tobytes())
+
+
+def generate_narration(text, filename):
+    """Generate offline speech using eSpeak NG."""
+    clean_text = " ".join(str(text).split())[:260]
+
+    if not clean_text:
+        return False
+
+    try:
+        subprocess.run(
+            [
+                "espeak-ng",
+                "-v", "en-us",
+                "-s", "165",
+                "-a", "170",
+                "-w", str(filename),
+                clean_text
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30
+        )
+
+        return Path(filename).exists()
+
+    except Exception as error:
+        print(f"Narration generation failed: {error}")
+        return False
+
+
 def create_video(idea, index):
     title = str(idea.get("title", "Gaming News"))
     hook = str(idea.get("hook", title))
@@ -241,37 +317,64 @@ def create_video(idea, index):
     )
 
     scenes = [
-        ("LATEST GAMING NEWS", hook),
-        (category.upper(), title),
-        ("WHAT YOU NEED TO KNOW", summary or "Read the original report for more details."),
-        ("WHAT DO YOU THINK?", "Follow ClipForge for more gaming updates.")
+        ("LATEST GAMING NEWS", hook, hook),
+        (category.upper(), title, title),
+        (
+            "WHAT YOU NEED TO KNOW",
+            summary or "Read the original report for more details.",
+            summary or title
+        ),
+        (
+            "WHAT DO YOU THINK?",
+            "Follow ClipForge for more gaming updates.",
+            "Follow ClipForge for more gaming updates."
+        )
     ]
 
     clips = []
+    audio_clips = []
     video = None
+    final_audio = None
+
+    AUDIO.mkdir(parents=True, exist_ok=True)
 
     try:
-        for scene_number, (heading, body) in enumerate(scenes, 1):
+        music_path = AUDIO / f"music_{article_id}.wav"
+        generate_music(music_path, SCENE_DURATION * len(scenes))
+
+        music_clip = AudioFileClip(str(music_path))
+        audio_clips.append(music_clip.with_volume_scaled(0.16))
+
+        for scene_number, (heading, body, narration) in enumerate(scenes):
             frame_image = make_scene(
                 heading,
                 body,
-                scene_number,
                 image_path
             )
 
             frame = np.array(frame_image)
 
-            # Gentle zoom across each scene.
-            clip = (
-                ImageClip(frame)
-                .with_duration(SCENE_DURATION)
-                .resized(lambda t: 1.0 + 0.025 * (t / SCENE_DURATION))
-                .with_position("center")
-            )
-
+            clip = ImageClip(frame).with_duration(SCENE_DURATION)
             clips.append(clip)
 
+            narration_path = AUDIO / f"voice_{article_id}_{scene_number}.wav"
+
+            if generate_narration(narration, narration_path):
+                voice = AudioFileClip(str(narration_path))
+                audio_clips.append(
+                    voice
+                    .with_start(scene_number * SCENE_DURATION)
+                    .with_volume_scaled(1.0)
+                )
+                print(f"Voice generated for scene {scene_number + 1}")
+
         video = concatenate_videoclips(clips, method="compose")
+
+        final_audio = CompositeAudioClip(audio_clips).with_duration(
+            video.duration
+        )
+
+        video = video.with_audio(final_audio)
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         filename = OUTPUT / f"story_{index}.mp4"
@@ -282,7 +385,8 @@ def create_video(idea, index):
             str(filename),
             fps=FPS,
             codec="libx264",
-            audio=False,
+            audio_codec="aac",
+            audio_bitrate="192k",
             logger="bar"
         )
 
@@ -292,17 +396,21 @@ def create_video(idea, index):
         if video:
             video.close()
 
+        if final_audio:
+            final_audio.close()
+
         for clip in clips:
+            clip.close()
+
+        for clip in audio_clips:
             clip.close()
 
 
 def main():
-    print("ClipForge visual renderer starting...")
+    print("ClipForge visual and audio renderer starting...")
 
     if not PLAN.exists():
-        raise FileNotFoundError(
-            f"Content plan not found: {PLAN}"
-        )
+        raise FileNotFoundError(f"Content plan not found: {PLAN}")
 
     with open(PLAN, "r", encoding="utf-8") as file:
         plan = json.load(file)
@@ -310,12 +418,10 @@ def main():
     ideas = plan.get("ideas", [])
 
     if not ideas:
-        print("No content ideas available. Nothing to render.")
+        print("No content ideas available.")
         return
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
-
-    print(f"Content ideas available: {len(ideas)}")
 
     rendered = 0
 
@@ -331,7 +437,6 @@ def main():
     print("--------------------------------")
     print("ClipForge rendering complete.")
     print(f"Videos successfully created: {rendered}")
-    print(f"Output directory: {OUTPUT}")
     print("--------------------------------")
 
 
