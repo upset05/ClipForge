@@ -1,7 +1,9 @@
-import numpy as np
+
 import json
+import re
 from pathlib import Path
-from datetime import datetime
+
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy import ImageClip, concatenate_videoclips
 
@@ -11,7 +13,10 @@ OUTPUT = ROOT / "output"
 
 WIDTH = 1080
 HEIGHT = 1920
-DURATION = 4
+SCENE_DURATION = 4
+FPS = 24
+MAX_STORIES = 5
+
 
 def load_font(size):
     candidates = [
@@ -19,14 +24,15 @@ def load_font(size):
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
 
-    for path in candidates:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
+    for font_path in candidates:
+        if Path(font_path).exists():
+            return ImageFont.truetype(font_path, size)
 
     return ImageFont.load_default()
 
+
 def wrap_text(draw, text, font, max_width):
-    words = text.split()
+    words = str(text).split()
     lines = []
     current = ""
 
@@ -45,7 +51,8 @@ def wrap_text(draw, text, font, max_width):
 
     return lines
 
-def make_scene(heading, body, number):
+
+def make_scene(heading, body, story_number, scene_number):
     image = Image.new("RGB", (WIDTH, HEIGHT), "#101522")
     draw = ImageDraw.Draw(image)
 
@@ -61,7 +68,7 @@ def make_scene(heading, body, number):
 
     draw.text(
         (95, 105),
-        "CLIPFORGE  /  GAMING",
+        "CLIPFORGE / GAMING",
         font=small_font,
         fill="white"
     )
@@ -74,75 +81,123 @@ def make_scene(heading, body, number):
     )
 
     y = 470
+    max_width = WIDTH - 170
 
-    for line in wrap_text(draw, body, body_font, WIDTH - 170):
-        draw.text((80, y), line, font=body_font, fill="white")
-        y += 70
-
+    for line in wrap_text(draw, body, body_font, max_width):
         if y > HEIGHT - 300:
             break
 
+        draw.text(
+            (80, y),
+            line,
+            font=body_font,
+            fill="white"
+        )
+        y += 70
+
     draw.text(
         (80, HEIGHT - 150),
-        f"STORY {number}  |  CLIPFORGE",
+        f"STORY {story_number}  |  SCENE {scene_number}",
         font=small_font,
         fill="#aab6cc"
     )
 
     return image
 
-def main():
-    if not PLAN.exists():
-        raise FileNotFoundError("Content plan not found.")
 
-    with open(PLAN, encoding="utf-8") as file:
+def create_video(idea, index):
+    title = str(idea.get("title", "Gaming News"))
+    hook = str(idea.get("hook", title))
+    summary = str(idea.get("summary", ""))
+    category = str(idea.get("category", "Gaming"))
+
+    scenes = [
+        ("TODAY IN GAMING", hook),
+        (category.upper(), title),
+        ("THE DETAILS", summary or "More information is available from the original source."),
+        ("YOUR TAKE?", "What do you think? Follow for more gaming updates.")
+    ]
+
+    clips = []
+
+    try:
+        for scene_number, (heading, body) in enumerate(scenes, 1):
+            image = make_scene(
+                heading,
+                body,
+                index,
+                scene_number
+            )
+
+            # Convert the Pillow image into a NumPy array.
+            frame = np.array(image)
+
+            clip = ImageClip(frame).with_duration(SCENE_DURATION)
+            clips.append(clip)
+
+        video = concatenate_videoclips(clips, method="compose")
+
+        OUTPUT.mkdir(parents=True, exist_ok=True)
+
+        filename = OUTPUT / f"story_{index}.mp4"
+
+        print(f"Rendering story {index}: {title}")
+
+        video.write_videofile(
+            str(filename),
+            fps=FPS,
+            codec="libx264",
+            audio=False,
+            logger="bar"
+        )
+
+        video.close()
+
+        print(f"SUCCESS: Created {filename}")
+
+    finally:
+        for clip in clips:
+            clip.close()
+
+
+def main():
+    print("ClipForge video renderer starting...")
+
+    if not PLAN.exists():
+        raise FileNotFoundError(
+            f"Content plan not found: {PLAN}"
+        )
+
+    with open(PLAN, "r", encoding="utf-8") as file:
         plan = json.load(file)
 
     ideas = plan.get("ideas", [])
 
     if not ideas:
-        print("No content ideas available.")
+        print("No content ideas available. Nothing to render.")
         return
 
-    OUTPUT.mkdir(exist_ok=True)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
 
-    for index, idea in enumerate(ideas[:5], 1):
-        title = idea.get("title", "Gaming News")
-        hook = idea.get("hook", title)
-        summary = idea.get("summary", "")
-        category = idea.get("category", "Gaming")
+    print(f"Content ideas available: {len(ideas)}")
 
-        scenes = [
-            ("TODAY IN GAMING", hook),
-            (category.upper(), title),
-            ("THE DETAILS", summary or "More information is available from the original source."),
-            ("YOUR TAKE?", "What do you think? Follow for more gaming updates.")
-        ]
+    rendered = 0
 
-        clips = []
+    for index, idea in enumerate(ideas[:MAX_STORIES], 1):
+        try:
+            create_video(idea, index)
+            rendered += 1
 
-        for heading, body in scenes:
-            image = make_scene(heading, body, index)
-           clips.append(
-    ImageClip(np.array(image)).with_duration(DURATION)
-)
+        except Exception as error:
+            print(f"FAILED to render story {index}: {error}")
+            raise
 
-        video = concatenate_videoclips(clips, method="compose")
+    print("--------------------------------")
+    print(f"ClipForge rendering complete.")
+    print(f"Videos successfully created: {rendered}")
+    print(f"Output directory: {OUTPUT}")
+    print("--------------------------------")
 
-        filename = OUTPUT / f"story_{index}.mp4"
-
-        video.write_videofile(
-            str(filename),
-            fps=24,
-            codec="libx264",
-            audio=False,
-            logger=None
-        )
-
-        video.close()
-
-        print(f"Created: {filename}")
 
 if __name__ == "__main__":
     main()
-
