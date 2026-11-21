@@ -1,21 +1,29 @@
 
 import json
 import re
+import hashlib
 from pathlib import Path
+from io import BytesIO
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from moviepy import ImageClip, concatenate_videoclips
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAN = ROOT / "reports" / "content_plan.json"
 OUTPUT = ROOT / "output"
+ASSETS = ROOT / "assets" / "images"
 
 WIDTH = 1080
 HEIGHT = 1920
 SCENE_DURATION = 4
 FPS = 24
 MAX_STORIES = 5
+
+HEADERS = {
+    "User-Agent": "ClipForge/1.0 (gaming news video renderer)"
+}
 
 
 def load_font(size):
@@ -52,8 +60,81 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
-def make_scene(heading, body, story_number, scene_number):
-    image = Image.new("RGB", (WIDTH, HEIGHT), "#101522")
+def download_image(url, article_id):
+    if not url:
+        return None
+
+    ASSETS.mkdir(parents=True, exist_ok=True)
+
+    filename = ASSETS / f"{article_id}.jpg"
+
+    if filename.exists():
+        return filename
+
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20
+        )
+        response.raise_for_status()
+
+        if len(response.content) > 15 * 1024 * 1024:
+            print("Image skipped: file too large.")
+            return None
+
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        image.thumbnail((1600, 1600))
+
+        image.save(filename, "JPEG", quality=88)
+
+        print(f"Downloaded image: {filename}")
+
+        return filename
+
+    except Exception as error:
+        print(f"Image download failed: {error}")
+        return None
+
+
+def load_background(image_path):
+    if image_path and Path(image_path).exists():
+        try:
+            image = Image.open(image_path).convert("RGB")
+
+            image_ratio = image.width / image.height
+            target_ratio = WIDTH / HEIGHT
+
+            if image_ratio > target_ratio:
+                new_width = int(image.height * target_ratio)
+                left = (image.width - new_width) // 2
+                image = image.crop(
+                    (left, 0, left + new_width, image.height)
+                )
+            else:
+                new_height = int(image.width / target_ratio)
+                top = (image.height - new_height) // 2
+                image = image.crop(
+                    (0, top, image.width, top + new_height)
+                )
+
+            image = image.resize((WIDTH, HEIGHT))
+            image = ImageEnhance.Brightness(image).enhance(0.48)
+
+            return image
+
+        except Exception as error:
+            print(f"Background image error: {error}")
+
+    return Image.new("RGB", (WIDTH, HEIGHT), "#101522")
+
+
+def make_scene(heading, body, story_number, scene_number, image_path=None):
+    image = load_background(image_path)
+
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (8, 13, 25, 105))
+    image = Image.alpha_composite(image.convert("RGBA"), overlay)
+
     draw = ImageDraw.Draw(image)
 
     title_font = load_font(66)
@@ -63,7 +144,7 @@ def make_scene(heading, body, story_number, scene_number):
     draw.rounded_rectangle(
         (65, 75, WIDTH - 65, 180),
         radius=28,
-        fill="#24344f"
+        fill=(36, 52, 79, 235)
     )
 
     draw.text(
@@ -73,18 +154,41 @@ def make_scene(heading, body, story_number, scene_number):
         fill="white"
     )
 
-    draw.text(
-        (75, 300),
-        heading,
-        font=title_font,
-        fill="#65d6ff"
+    draw.rounded_rectangle(
+        (55, 250, WIDTH - 55, HEIGHT - 260),
+        radius=35,
+        fill=(10, 16, 29, 175)
     )
 
-    y = 470
-    max_width = WIDTH - 170
+    heading_lines = wrap_text(
+        draw,
+        heading,
+        title_font,
+        WIDTH - 170
+    )
 
-    for line in wrap_text(draw, body, body_font, max_width):
-        if y > HEIGHT - 300:
+    y = 330
+
+    for line in heading_lines[:3]:
+        draw.text(
+            (80, y),
+            line,
+            font=title_font,
+            fill="#65d6ff"
+        )
+        y += 85
+
+    y += 55
+
+    body_lines = wrap_text(
+        draw,
+        body,
+        body_font,
+        WIDTH - 170
+    )
+
+    for line in body_lines[:12]:
+        if y > HEIGHT - 390:
             break
 
         draw.text(
@@ -96,13 +200,13 @@ def make_scene(heading, body, story_number, scene_number):
         y += 70
 
     draw.text(
-        (80, HEIGHT - 150),
+        (80, HEIGHT - 180),
         f"STORY {story_number}  |  SCENE {scene_number}",
         font=small_font,
-        fill="#aab6cc"
+        fill="#d4deef"
     )
 
-    return image
+    return image.convert("RGB")
 
 
 def create_video(idea, index):
@@ -111,26 +215,36 @@ def create_video(idea, index):
     summary = str(idea.get("summary", ""))
     category = str(idea.get("category", "Gaming"))
 
+    article_id = idea.get("id") or hashlib.sha256(
+        idea.get("link", title).encode("utf-8")
+    ).hexdigest()[:16]
+
+    image_path = download_image(
+        idea.get("image_url", ""),
+        article_id
+    )
+
     scenes = [
         ("TODAY IN GAMING", hook),
         (category.upper(), title),
         ("THE DETAILS", summary or "More information is available from the original source."),
-        ("YOUR TAKE?", "What do you think? Follow for more gaming updates.")
+        ("YOUR TAKE?", "What do you think about this? Follow for more gaming updates.")
     ]
 
     clips = []
+    video = None
 
     try:
         for scene_number, (heading, body) in enumerate(scenes, 1):
-            image = make_scene(
+            frame_image = make_scene(
                 heading,
                 body,
                 index,
-                scene_number
+                scene_number,
+                image_path
             )
 
-            # Convert the Pillow image into a NumPy array.
-            frame = np.array(image)
+            frame = np.array(frame_image)
 
             clip = ImageClip(frame).with_duration(SCENE_DURATION)
             clips.append(clip)
@@ -151,17 +265,18 @@ def create_video(idea, index):
             logger="bar"
         )
 
-        video.close()
-
         print(f"SUCCESS: Created {filename}")
 
     finally:
+        if video:
+            video.close()
+
         for clip in clips:
             clip.close()
 
 
 def main():
-    print("ClipForge video renderer starting...")
+    print("ClipForge visual renderer starting...")
 
     if not PLAN.exists():
         raise FileNotFoundError(
@@ -193,7 +308,7 @@ def main():
             raise
 
     print("--------------------------------")
-    print(f"ClipForge rendering complete.")
+    print("ClipForge rendering complete.")
     print(f"Videos successfully created: {rendered}")
     print(f"Output directory: {OUTPUT}")
     print("--------------------------------")
