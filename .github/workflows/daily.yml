@@ -18,7 +18,7 @@ jobs:
   worker:
     name: Discover, Plan and Render
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -29,20 +29,33 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install audio tools
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y espeak-ng
+          sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install feedparser pillow moviepy requests numpy
+          pip install feedparser pillow moviepy requests numpy piper-tts
 
-      - name: Verify audio engine
+      - name: Download Piper voice model
         run: |
-          espeak-ng --version
-          echo "Audio engine ready."
+          mkdir -p assets/voices
+
+          curl -L --fail \
+            -o assets/voices/en_US-lessac-medium.onnx \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+
+          curl -L --fail \
+            -o assets/voices/en_US-lessac-medium.onnx.json \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+
+      - name: Verify Piper
+        run: |
+          piper --help
+          test -s assets/voices/en_US-lessac-medium.onnx
+          echo "Piper voice model ready."
 
       - name: Run discovery engine
         run: python discovery/feeds.py
@@ -50,16 +63,17 @@ jobs:
       - name: Run content planner
         run: python content/plan.py
 
-      - name: Render videos with audio
+      - name: Render videos
         run: python video/render.py
 
       - name: Verify rendered videos
         run: |
           set -e
-          echo "Checking generated videos..."
+
           find output -maxdepth 1 -type f -name "*.mp4" -print
 
           COUNT=$(find output -maxdepth 1 -type f -name "*.mp4" | wc -l)
+
           echo "Videos generated: $COUNT"
 
           if [ "$COUNT" -eq 0 ]; then
