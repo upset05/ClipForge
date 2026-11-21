@@ -1,9 +1,11 @@
+
 import json
-import os
 import re
 import hashlib
+import html
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import feedparser
 
@@ -11,8 +13,98 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "discovery" / "sources.json"
 OUTPUT = ROOT / "reports"
 
+
 def clean(text):
-    return re.sub(r"\s+", " ", text or "").strip()
+    text = html.unescape(str(text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_image(entry):
+    """
+    Extract the best available image URL from an RSS entry.
+    """
+
+    # 1. Media RSS images
+    media_content = entry.get("media_content", [])
+
+    for media in media_content:
+        image_url = media.get("url", "")
+        media_type = media.get("type", "")
+
+        if image_url and (
+            media_type.startswith("image/")
+            or re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", image_url, re.I)
+        ):
+            return {
+                "url": image_url,
+                "caption": clean(media.get("title", "")),
+                "source": "media_content"
+            }
+
+    # 2. Media thumbnails
+    thumbnails = entry.get("media_thumbnail", [])
+
+    if thumbnails:
+        image_url = thumbnails[0].get("url", "")
+
+        if image_url:
+            return {
+                "url": image_url,
+                "caption": "",
+                "source": "media_thumbnail"
+            }
+
+    # 3. Enclosures
+    for enclosure in entry.get("enclosures", []):
+        image_url = enclosure.get("href") or enclosure.get("url", "")
+        media_type = enclosure.get("type", "")
+
+        if image_url and media_type.startswith("image/"):
+            return {
+                "url": image_url,
+                "caption": "",
+                "source": "enclosure"
+            }
+
+    # 4. Images embedded in the article summary
+    summary = entry.get("summary", "")
+
+    image_matches = re.findall(
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        summary,
+        re.IGNORECASE
+    )
+
+    if image_matches:
+        return {
+            "url": html.unescape(image_matches[0]),
+            "caption": "",
+            "source": "summary"
+        }
+
+    # 5. Images embedded in content blocks
+    for content in entry.get("content", []):
+        value = content.get("value", "")
+
+        image_matches = re.findall(
+            r'<img[^>]+src=["\']([^"\']+)["\']',
+            value,
+            re.IGNORECASE
+        )
+
+        if image_matches:
+            return {
+                "url": html.unescape(image_matches[0]),
+                "caption": "",
+                "source": "content"
+            }
+
+    return {
+        "url": "",
+        "caption": "",
+        "source": "unavailable"
+    }
+
 
 def score_article(article, keywords, priority):
     text = clean(
@@ -32,17 +124,22 @@ def score_article(article, keywords, priority):
 
     return score
 
-def main():
-    with open(CONFIG, encoding="utf-8") as f:
-        config = json.load(f)
 
-    OUTPUT.mkdir(exist_ok=True)
+def main():
+    with open(CONFIG, encoding="utf-8") as file:
+        config = json.load(file)
+
+    OUTPUT.mkdir(parents=True, exist_ok=True)
 
     articles = []
     seen = set()
 
+    print("ClipForge discovery starting...")
+
     for url in config["feeds"]:
         try:
+            print(f"Checking feed: {url}")
+
             feed = feedparser.parse(url)
 
             if getattr(feed, "bozo", False):
@@ -73,16 +170,31 @@ def main():
                 if score <= 0:
                     continue
 
-                articles.append({
+                image = extract_image(entry)
+
+                published = (
+                    entry.get("published")
+                    or entry.get("updated")
+                    or ""
+                )
+
+                article = {
+                    "id": key[:16],
                     "title": title,
                     "link": link,
                     "summary": clean(entry.get("summary")),
+                    "image_url": image["url"],
+                    "image_caption": image["caption"],
+                    "image_source": image["source"],
                     "score": score,
-                    "source": url
-                })
+                    "source": url,
+                    "published": published
+                }
 
-        except Exception as e:
-            print(f"Feed failed: {url} | {e}")
+                articles.append(article)
+
+        except Exception as error:
+            print(f"Feed failed: {url} | {error}")
 
     articles.sort(
         key=lambda item: item["score"],
@@ -95,28 +207,54 @@ def main():
     report = {
         "generated_at": now.isoformat(),
         "total_candidates": len(articles),
+        "articles_with_images": sum(
+            1 for article in articles
+            if article["image_url"]
+        ),
         "articles": articles[:50]
     }
 
     json_path = OUTPUT / f"{date}.json"
     md_path = OUTPUT / f"{date}.md"
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
+    with open(json_path, "w", encoding="utf-8") as file:
+        json.dump(
+            report,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
 
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(f"# ClipForge Discovery — {date}\n\n")
-        f.write(f"Found {len(articles)} relevant articles.\n\n")
+    with open(md_path, "w", encoding="utf-8") as file:
+        file.write(f"# ClipForge Discovery — {date}\n\n")
+        file.write(f"Found {len(articles)} relevant articles.\n\n")
+        file.write(
+            f"Articles with images: "
+            f"{report['articles_with_images']}\n\n"
+        )
 
         for article in articles[:30]:
-            f.write(f"## {article['title']}\n\n")
-            f.write(f"Score: {article['score']}\n\n")
-            f.write(f"{article['summary'][:600]}\n\n")
-            f.write(f"Source: {article['link']}\n\n")
-            f.write("---\n\n")
+            file.write(f"## {article['title']}\n\n")
+            file.write(f"Score: {article['score']}\n\n")
+            file.write(f"{article['summary'][:600]}\n\n")
 
+            if article["image_url"]:
+                file.write(
+                    f"Image: {article['image_url']}\n\n"
+                )
+            else:
+                file.write("Image: Not available in feed\n\n")
+
+            file.write(f"Source: {article['link']}\n\n")
+            file.write("---\n\n")
+
+    print("--------------------------------")
     print(f"Candidates: {len(articles)}")
+    print(f"Articles with images: {report['articles_with_images']}")
     print(f"Report: {md_path}")
+    print("Discovery complete.")
+    print("--------------------------------")
+
 
 if __name__ == "__main__":
     main()
