@@ -18,7 +18,7 @@ jobs:
   worker:
     name: Discover, Plan and Render
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies
+      - name: Install system tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
@@ -39,47 +39,111 @@ jobs:
           python -m pip install --upgrade pip
           pip install feedparser pillow moviepy requests numpy piper-tts
 
-      - name: Download Piper voice model
+      - name: Prepare Piper voice model
         run: |
+          set -e
+
           mkdir -p assets/voices
 
-          curl -L --fail \
-            -o assets/voices/en_US-lessac-medium.onnx \
-            https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+          MODEL_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+          CONFIG_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
 
-          curl -L --fail \
-            -o assets/voices/en_US-lessac-medium.onnx.json \
-            https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+          curl --fail --location --retry 3 "$MODEL_URL" \
+            --output assets/voices/en_US-lessac-medium.onnx
 
-      - name: Verify Piper
-        run: |
-          piper --help
+          curl --fail --location --retry 3 "$CONFIG_URL" \
+            --output assets/voices/en_US-lessac-medium.onnx.json
+
           test -s assets/voices/en_US-lessac-medium.onnx
-          echo "Piper voice model ready."
+          test -s assets/voices/en_US-lessac-medium.onnx.json
 
-      - name: Run discovery engine
+          echo "Piper voice model downloaded."
+
+      - name: Verify rendering tools
+        run: |
+          python --version
+          ffmpeg -version
+          ffprobe -version
+          piper --help
+          echo "Rendering tools are ready."
+
+      - name: Run news discovery
         run: python discovery/feeds.py
 
       - name: Run content planner
         run: python content/plan.py
 
+      - name: Discover approved media
+        run: python media/discover.py
+
       - name: Render videos
         run: python video/render.py
 
-      - name: Verify rendered videos
+      - name: Validate generated videos
         run: |
           set -e
 
-          find output -maxdepth 1 -type f -name "*.mp4" -print
+          echo "Checking generated videos..."
 
-          COUNT=$(find output -maxdepth 1 -type f -name "*.mp4" | wc -l)
+          mapfile -t VIDEOS < <(
+            find output -maxdepth 1 -type f -name "*.mp4" | sort
+          )
 
-          echo "Videos generated: $COUNT"
+          VIDEO_COUNT=${#VIDEOS[@]}
 
-          if [ "$COUNT" -eq 0 ]; then
+          echo "Videos generated: $VIDEO_COUNT"
+
+          if [ "$VIDEO_COUNT" -eq 0 ]; then
             echo "No videos were generated."
             exit 1
           fi
+
+          if [ "$VIDEO_COUNT" -gt 5 ]; then
+            echo "More than five videos were generated."
+            exit 1
+          fi
+
+          for VIDEO in "${VIDEOS[@]}"; do
+            echo "Checking: $VIDEO"
+
+            VIDEO_STREAM=$(ffprobe \
+              -v error \
+              -select_streams v:0 \
+              -show_entries stream=codec_type \
+              -of csv=p=0 "$VIDEO")
+
+            AUDIO_STREAM=$(ffprobe \
+              -v error \
+              -select_streams a:0 \
+              -show_entries stream=codec_type \
+              -of csv=p=0 "$VIDEO")
+
+            if [ "$VIDEO_STREAM" != "video" ]; then
+              echo "Missing video stream: $VIDEO"
+              exit 1
+            fi
+
+            if [ "$AUDIO_STREAM" != "audio" ]; then
+              echo "Missing audio stream: $VIDEO"
+              exit 1
+            fi
+
+            ffprobe \
+              -v error \
+              -show_entries format=duration \
+              -of default=noprint_wrappers=1:nokey=1 "$VIDEO"
+          done
+
+          CREDIT_COUNT=$(find output -maxdepth 1 -type f -name "credits_*.md" | wc -l)
+
+          echo "Credit files: $CREDIT_COUNT"
+
+          if [ "$CREDIT_COUNT" -ne "$VIDEO_COUNT" ]; then
+            echo "Every video must have a matching credits file."
+            exit 1
+          fi
+
+          echo "All video and audio checks passed."
 
       - name: Upload ClipForge outputs
         uses: actions/upload-artifact@v4
