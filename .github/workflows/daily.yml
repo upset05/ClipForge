@@ -1,3 +1,4 @@
+
 name: ClipForge Cloud Worker
 
 on:
@@ -16,10 +17,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Run content planner
-        run: python content/plan.py
-        
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -30,6 +28,9 @@ jobs:
 
       - name: Run discovery engine
         run: python discovery/feeds.py
+
+      - name: Run content planner
+        run: python content/plan.py
 
       - name: Upload discovery reports
         uses: actions/upload-artifact@v4
