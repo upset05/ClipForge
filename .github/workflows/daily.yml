@@ -16,7 +16,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        
+      - name: Run content planner
+        run: python content/plan.py
+        
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
