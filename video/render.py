@@ -9,7 +9,6 @@ import wave
 from pathlib import Path
 
 import numpy as np
-import requests
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from moviepy import (
     ImageClip,
@@ -24,10 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 PLAN = ROOT / "reports" / "content_plan.json"
 OUTPUT = ROOT / "output"
-ASSETS = ROOT / "assets" / "images"
 AUDIO = ROOT / "assets" / "audio"
 VOICE_DIR = ROOT / "assets" / "voices"
-MEDIA_DIR = ROOT / "assets" / "media"
 
 VOICE_MODEL = VOICE_DIR / "en_US-lessac-medium.onnx"
 
@@ -43,10 +40,6 @@ SCENE_PAUSE = 0.25
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".ogv", ".mov", ".m4v"}
-
-HEADERS = {
-    "User-Agent": "ClipForge/3.0 (gaming news renderer)"
-}
 
 
 def load_font(size):
@@ -73,11 +66,9 @@ def split_sentences(text):
     if not text:
         return []
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-
     return [
         sentence.strip()
-        for sentence in sentences
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
         if sentence.strip()
     ]
 
@@ -105,13 +96,16 @@ def wrap_text(draw, text, font, max_width):
 
 def get_licensed_assets(idea):
     """
-    Only use media explicitly approved and downloaded
+    Accept only downloaded assets explicitly approved
     by the media discovery component.
     """
     assets = []
 
     for asset in idea.get("licensed_media_assets", []):
-        if not asset.get("approved_for_reuse"):
+        if not isinstance(asset, dict):
+            continue
+
+        if asset.get("approved_for_reuse") is not True:
             continue
 
         relative_path = asset.get("local_path", "")
@@ -124,28 +118,41 @@ def get_licensed_assets(idea):
         try:
             path.relative_to(ROOT)
         except ValueError:
+            print("Skipped media outside project directory.")
             continue
 
-        if not path.exists():
+        if not path.is_file():
             continue
 
         kind = asset.get("kind", "")
+        extension = path.suffix.lower()
 
-        if kind == "image" and path.suffix.lower() in IMAGE_EXTENSIONS:
+        if kind == "image" and extension in IMAGE_EXTENSIONS:
             assets.append({
                 "path": path,
                 "kind": "image",
                 "metadata": asset
             })
 
-        elif kind == "video" and path.suffix.lower() in VIDEO_EXTENSIONS:
+        elif kind == "video" and extension in VIDEO_EXTENSIONS:
             assets.append({
                 "path": path,
                 "kind": "video",
                 "metadata": asset
             })
 
-    return assets
+    # Avoid using the same local file twice.
+    unique = []
+    seen_paths = set()
+
+    for asset in assets:
+        key = str(asset["path"])
+
+        if key not in seen_paths:
+            seen_paths.add(key)
+            unique.append(asset)
+
+    return unique
 
 
 def get_credit_line(asset):
@@ -166,7 +173,49 @@ def get_credit_line(asset):
     return f"MEDIA: {creator} | {license_name}"
 
 
-def load_background(image_path):
+def create_original_background(scene_number):
+    """
+    Create an original ClipForge background when no unused
+    approved media remains. No external media is reused.
+    """
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        "#101522"
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    accent_positions = [
+        (150, 420),
+        (820, 650),
+        (250, 1100),
+        (850, 1350),
+        (500, 850)
+    ]
+
+    x, y = accent_positions[scene_number % len(accent_positions)]
+
+    draw.ellipse(
+        (x - 260, y - 260, x + 260, y + 260),
+        fill="#172b43"
+    )
+
+    draw.ellipse(
+        (x - 150, y - 150, x + 150, y + 150),
+        fill="#1c3854"
+    )
+
+    draw.line(
+        (0, HEIGHT - 500, WIDTH, HEIGHT - 500),
+        fill="#25445e",
+        width=3
+    )
+
+    return image
+
+
+def load_background(image_path, scene_number):
     if image_path and image_path.exists():
         try:
             image = Image.open(image_path).convert("RGB")
@@ -205,21 +254,20 @@ def load_background(image_path):
         except Exception as error:
             print(f"Image loading failed: {error}")
 
-    return Image.new("RGB", (WIDTH, HEIGHT), "#101522")
+    return create_original_background(scene_number)
 
 
 def create_overlay(heading, caption, credit):
-    """
-    Create a transparent overlay so text sits directly
-    over the image or gameplay footage.
-    """
     overlay = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
         (0, 0, 0, 0)
     )
 
-    pixels = np.zeros((HEIGHT, WIDTH, 4), dtype=np.uint8)
+    pixels = np.zeros(
+        (HEIGHT, WIDTH, 4),
+        dtype=np.uint8
+    )
 
     start_y = int(HEIGHT * 0.48)
 
@@ -227,9 +275,6 @@ def create_overlay(heading, caption, credit):
         progress = (y - start_y) / (HEIGHT - start_y)
         alpha = int(205 * (progress ** 1.35))
 
-        pixels[y, :, 0] = 0
-        pixels[y, :, 1] = 0
-        pixels[y, :, 2] = 0
         pixels[y, :, 3] = alpha
 
     overlay = Image.alpha_composite(
@@ -284,7 +329,6 @@ def create_overlay(heading, caption, credit):
             stroke_width=3,
             stroke_fill=(0, 0, 0, 180)
         )
-
         y += 72
 
     y += 30
@@ -296,7 +340,6 @@ def create_overlay(heading, caption, credit):
         WIDTH - 140
     )
 
-    # Keep captions readable and avoid overflowing the screen.
     for line in caption_lines[:5]:
         if y > HEIGHT - 180:
             break
@@ -365,8 +408,6 @@ def audio_duration(filename):
 
 def generate_music(filename, duration):
     """Preserve the original calming electronic soundtrack."""
-    AUDIO.mkdir(parents=True, exist_ok=True)
-
     sample_count = max(1, int(SAMPLE_RATE * duration))
     times = np.arange(sample_count) / SAMPLE_RATE
 
@@ -417,24 +458,25 @@ def generate_music(filename, duration):
 
 
 def build_narration_units(idea):
-    """
-    Convert planner segments into sentence-level units.
-    Each sentence receives its own narration and matching caption.
-    """
     units = []
 
     segments = idea.get("script_segments", [])
 
     if not segments:
-        segments = [
-            {
-                "label": "THE LATEST",
-                "text": idea.get("script") or idea.get("summary") or idea.get("title")
-            }
-        ]
+        segments = [{
+            "label": "THE LATEST",
+            "text": (
+                idea.get("script")
+                or idea.get("summary")
+                or idea.get("title")
+            )
+        }]
 
     for segment in segments:
-        heading = clean_text(segment.get("label", "GAMING NEWS"))
+        heading = clean_text(
+            segment.get("label", "GAMING NEWS")
+        )
+
         text = clean_text(segment.get("text", ""))
 
         if not text:
@@ -482,8 +524,8 @@ def prepare_narration(units, article_id):
 
 def prepare_video_background(path, duration):
     """
-    Prepare a muted gameplay clip cropped to vertical format.
-    Only use a clip long enough for the current narration unit.
+    Prepare one approved gameplay clip for one scene.
+    Never loop a short clip or reuse it for another scene.
     """
     source = VideoFileClip(str(path))
 
@@ -511,11 +553,6 @@ def prepare_video_background(path, duration):
 
 
 def make_visual_clip(unit, asset, duration, unit_index):
-    """
-    Use licensed gameplay footage where possible.
-    Otherwise use a licensed image.
-    """
-    metadata = asset["metadata"] if asset else {}
     credit = get_credit_line(asset)
 
     overlay = create_overlay(
@@ -529,6 +566,8 @@ def make_visual_clip(unit, asset, duration, unit_index):
         transparent=True
     ).with_duration(duration)
 
+    resources = []
+
     if asset and asset["kind"] == "video":
         try:
             prepared = prepare_video_background(
@@ -538,23 +577,27 @@ def make_visual_clip(unit, asset, duration, unit_index):
 
             if prepared:
                 source, background = prepared
+                resources.extend([source, background])
 
                 composite = CompositeVideoClip(
                     [background, overlay_clip],
                     size=(WIDTH, HEIGHT)
                 ).with_duration(duration)
 
-                return composite, [source, background, overlay_clip]
+                resources.append(overlay_clip)
+
+                return composite, resources
 
         except Exception as error:
             print(f"Gameplay clip failed: {error}")
 
-    image_path = None
+    image_path = (
+        asset["path"]
+        if asset and asset["kind"] == "image"
+        else None
+    )
 
-    if asset and asset["kind"] == "image":
-        image_path = asset["path"]
-
-    image = load_background(image_path)
+    image = load_background(image_path, unit_index)
 
     background_clip = ImageClip(
         np.array(image)
@@ -565,30 +608,69 @@ def make_visual_clip(unit, asset, duration, unit_index):
         size=(WIDTH, HEIGHT)
     ).with_duration(duration)
 
-    return composite, [background_clip, overlay_clip]
+    resources.extend([
+        background_clip,
+        overlay_clip
+    ])
+
+    return composite, resources
+
+
+def select_unique_assets(assets, unit_count):
+    """
+    Use each video once, then each image once.
+    Do not recycle third-party media when scenes outnumber assets.
+    """
+    videos = [
+        asset for asset in assets
+        if asset["kind"] == "video"
+    ]
+
+    images = [
+        asset for asset in assets
+        if asset["kind"] == "image"
+    ]
+
+    queue = videos + images
+
+    return queue[:unit_count]
 
 
 def build_credits(idea, assets, article_id):
     credits_path = OUTPUT / f"credits_{article_id}.md"
 
+    unique_assets = []
+    seen = set()
+
+    for asset in assets:
+        key = str(asset["path"])
+
+        if key not in seen:
+            seen.add(key)
+            unique_assets.append(asset)
+
     with open(credits_path, "w", encoding="utf-8") as file:
-        file.write(f"# ClipForge Media Credits\n\n")
+        file.write("# ClipForge Media Credits\n\n")
         file.write(f"**Story:** {idea.get('title', '')}\n\n")
+
+        file.write(
+            f"**Publisher:** {idea.get('source', 'Unknown')}\n\n"
+        )
 
         file.write(
             f"**Original news article:** "
             f"{idea.get('source_url') or idea.get('link', '')}\n\n"
         )
 
-        file.write("## Media used\n\n")
+        file.write("## Media actually used\n\n")
 
-        if not assets:
+        if not unique_assets:
             file.write(
                 "No third-party media was used. "
-                "Visuals were generated by ClipForge.\n"
+                "Original ClipForge backgrounds were used instead.\n"
             )
 
-        for index, asset in enumerate(assets, 1):
+        for index, asset in enumerate(unique_assets, 1):
             metadata = asset["metadata"]
 
             file.write(f"### Asset {index}\n\n")
@@ -628,18 +710,11 @@ def create_video(idea, index):
 
     assets = get_licensed_assets(idea)
 
-    images = [
-        asset for asset in assets
-        if asset["kind"] == "image"
-    ]
-
-    videos = [
-        asset for asset in assets
-        if asset["kind"] == "video"
-    ]
-
-    print(f"Approved images: {len(images)}")
-    print(f"Approved gameplay/video candidates: {len(videos)}")
+    print(
+        f"Approved media available: {len(assets)} "
+        f"({sum(a['kind'] == 'video' for a in assets)} videos, "
+        f"{sum(a['kind'] == 'image' for a in assets)} images)"
+    )
 
     units = build_narration_units(idea)
 
@@ -664,27 +739,37 @@ def create_video(idea, index):
     visual_clips = []
     audio_clips = []
     resources = []
-
     used_assets = []
 
     try:
         music_clip = AudioFileClip(str(music_path))
         music_clip = music_clip.with_volume_scaled(MUSIC_VOLUME)
 
+        selected_assets = select_unique_assets(
+            assets,
+            len(units)
+        )
+
         visual_sequence = []
-        asset_index = 0
 
         for unit_index, unit in enumerate(units):
-            # Prefer gameplay footage, then approved images.
-            if videos:
-                asset = videos[unit_index % len(videos)]
-            elif images:
-                asset = images[unit_index % len(images)]
-            else:
-                asset = None
+            asset = (
+                selected_assets[unit_index]
+                if unit_index < len(selected_assets)
+                else None
+            )
 
             if asset:
                 used_assets.append(asset)
+                print(
+                    f"Scene {unit_index + 1}: "
+                    f"{asset['kind']} - {asset['path'].name}"
+                )
+            else:
+                print(
+                    f"Scene {unit_index + 1}: "
+                    "Original ClipForge background"
+                )
 
             visual, visual_resources = make_visual_clip(
                 unit,
@@ -705,8 +790,6 @@ def create_video(idea, index):
             voice = voice.with_volume_scaled(VOICE_VOLUME)
 
             audio_clips.append(voice)
-
-            asset_index += 1
 
         final_video = concatenate_videoclips(
             visual_sequence,
@@ -742,6 +825,7 @@ def create_video(idea, index):
         print("--------------------------------")
         print(f"SUCCESS: {filename.name}")
         print(f"Duration: {final_video.duration:.1f} seconds")
+        print(f"Unique third-party assets used: {len(used_assets)}")
         print(f"Credits: {credits_path.name}")
         print("--------------------------------")
 
@@ -775,7 +859,7 @@ def create_video(idea, index):
 
 
 def main():
-    print("ClipForge 3.0 renderer starting...")
+    print("ClipForge 3.1 renderer starting...")
 
     if not PLAN.exists():
         raise FileNotFoundError(
